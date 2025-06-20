@@ -849,23 +849,21 @@ function ReadwiseReader:downloadDocument(document)
     
     local content = document.html_content
     
-    if not content or content == "" then
+    if not content or content == "" or type(content) ~= "string" then
         logger.warn("ReadwiseReader:downloadDocument: no HTML content available for", document.id)
-        
         local basic_content = string.format([[
 <h1>%s</h1>
 <p><strong>Author:</strong> %s</p>
 <p><strong>Source:</strong> <a href="%s">%s</a></p>
 <p><strong>Summary:</strong> %s</p>
 <p><strong>Note:</strong> Full content was not available via API. Please visit the source URL above.</p>
-]], 
+]],
             document.title or "Untitled",
             document.author or "Unknown",
             document.source_url or "",
             document.source_url or "",
             document.summary or "No summary available"
         )
-        
         content = basic_content
     end
     
