@@ -8,6 +8,7 @@
 -- - Downloads articles from Readwise Reader "later" and "shortlist" locations
 -- - Converts articles to HTML format with embedded images
 -- - Generates KOReader metadata sidecars (.sdr) for enhanced library integration
+-- - Automatically manages KOReader collections based on article location
 -- - Offers filtering by article tags, location and type
 -- - Archives finished articles back to Readwise
 -- - Exports highlights and notes to Readwise
@@ -30,6 +31,7 @@ local InputDialog = require("ui/widget/inputdialog")
 local JSON = require("json")
 local LuaSettings = require("luasettings")
 local MultiConfirmBox = require("ui/widget/multiconfirmbox")
+local ReadCollection = require("readcollection")
 local MyClipping = require("clip")
 local NetworkMgr = require("ui/network/manager")
 local ReadHistory = require("readhistory")
@@ -259,6 +261,115 @@ function ReadwiseReader:setDocumentMetadata(filepath, document)
     else
         logger.warn("ReadwiseReader:setDocumentMetadata: failed to write custom metadata for", filepath)
     end
+end
+
+-- ===============================================================================
+-- COLLECTION MANAGEMENT
+-- ===============================================================================
+
+function ReadwiseReader:initCollectionTracking()
+    self.modified_collections = {}
+end
+
+function ReadwiseReader:saveCollections()
+    if next(self.modified_collections) then
+        local count = 0
+        for _ in pairs(self.modified_collections) do count = count + 1 end
+        logger.dbg("ReadwiseReader:saveCollections: saving", count, "modified collections")
+        ReadCollection:write(self.modified_collections)
+        self.modified_collections = {}
+    end
+end
+
+function ReadwiseReader:getCollectionNameForLocation(location)
+    if not location then
+        return nil
+    end
+
+    local location_display = location:sub(1,1):upper() .. location:sub(2)
+    return "Readwise: " .. location_display
+end
+
+function ReadwiseReader:ensureCollectionExists(location)
+    if not location then
+        return false
+    end
+
+    local collection_name = self:getCollectionNameForLocation(location)
+
+    if not ReadCollection.coll[collection_name] then
+        logger.dbg("ReadwiseReader:ensureCollectionExists: creating collection", collection_name)
+        ReadCollection:addCollection(collection_name)
+        return true
+    end
+
+    return false
+end
+
+function ReadwiseReader:removeFromAllCollections(filepath)
+    if not filepath then
+        return
+    end
+
+    local collections = ReadCollection:getCollectionsWithFile(filepath)
+    if collections and #collections > 0 then
+        for _, coll_name in ipairs(collections) do
+            if coll_name:match("^Readwise: ") then
+                logger.dbg("ReadwiseReader:removeFromAllCollections: removing", filepath, "from", coll_name)
+                ReadCollection:removeItem(filepath, coll_name, true)
+                self.modified_collections[coll_name] = true
+            end
+        end
+    end
+end
+
+function ReadwiseReader:updateDocumentCollections(filepath, document)
+    if not filepath or not document then
+        logger.dbg("ReadwiseReader:updateDocumentCollections: missing filepath or document")
+        return false
+    end
+
+    local new_location = document.location
+
+    if not new_location then
+        logger.dbg("ReadwiseReader:updateDocumentCollections: no location for document", document.id)
+        return false
+    end
+
+    self:ensureCollectionExists(new_location)
+
+    local new_collection = self:getCollectionNameForLocation(new_location)
+
+    if not new_collection then
+        return false
+    end
+
+    local all_readwise_collections = {}
+    if self.available_locations then
+        for _, location in ipairs(self.available_locations) do
+            local coll_name = self:getCollectionNameForLocation(location)
+            if ReadCollection.coll[coll_name] and ReadCollection:isFileInCollection(filepath, coll_name) then
+                table.insert(all_readwise_collections, coll_name)
+            end
+        end
+    end
+
+    for _, old_collection in ipairs(all_readwise_collections) do
+        if old_collection ~= new_collection then
+            ReadCollection:removeItem(filepath, old_collection, true)
+            self.modified_collections[old_collection] = true
+        end
+    end
+
+    local is_in_collection = ReadCollection.coll[new_collection] and ReadCollection:isFileInCollection(filepath, new_collection)
+
+    if not is_in_collection then
+        ReadCollection:addItem(filepath, new_collection)
+        self.modified_collections[new_collection] = true
+        return true
+    end
+
+    return false
 end
 
 -- ===============================================================================
@@ -1345,6 +1456,7 @@ function ReadwiseReader:cleanupArchivedDocuments()
         
         if local_filepath then
             logger.dbg("ReadwiseReader:cleanupArchivedDocuments: deleting locally archived document", doc.id, local_filepath)
+            self:removeFromAllCollections(local_filepath)
             FileManager:deleteFile(local_filepath, true)
             -- Remove author metadata for archived documents
             self:removeAuthorMetadata(doc.id)
@@ -1446,6 +1558,8 @@ function ReadwiseReader:downloadDocument(document)
         if not status then
             logger.warn("ReadwiseReader:downloadDocument: metadata writing failed:", err)
         end
+
+        self:updateDocumentCollections(filepath, document)
 
         return "downloaded"
     else
@@ -2008,7 +2122,9 @@ function ReadwiseReader:synchronize()
     local downloaded = 0
     local skipped = 0
     local failed = 0
-    
+
+    self:initCollectionTracking()
+
     for i, document in ipairs(filtered_documents) do
         self:showProgress(string.format("Downloading %d of %d: %s", i, #filtered_documents, document.title))
         
@@ -2022,7 +2138,9 @@ function ReadwiseReader:synchronize()
             failed = failed + 1
         end
     end
-    
+
+    self:saveCollections()
+
     self:hideProgress()
     
     self.last_sync_time = sync_start_time
