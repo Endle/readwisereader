@@ -94,7 +94,10 @@ function ReadwiseReader:init()
     
     -- Initialize author metadata storage
     self.document_authors = settings.document_authors or {}
-    
+
+    -- Initialize source URL metadata storage (for highlight export)
+    self.document_source_urls = settings.document_source_urls or {}
+
     -- Initialize image download settings
     self.download_images = settings.download_images == nil and true or settings.download_images
     self.max_image_size_mb = settings.max_image_size_mb or 10
@@ -211,6 +214,48 @@ function ReadwiseReader:getDocumentAuthorFromFile(filepath)
     local doc_id = self:getDocumentIdFromPath(filepath)
     if doc_id then
         return self:getStoredAuthor(doc_id)
+    end
+    return nil
+end
+
+-- ===============================================================================
+-- SOURCE URL METADATA STORAGE AND RETRIEVAL FUNCTIONS
+-- ===============================================================================
+
+function ReadwiseReader:storeSourceUrlMetadata(document_id, source_url)
+    if not self.document_source_urls then
+        self.document_source_urls = {}
+    end
+
+    if source_url and type(source_url) == "string" and source_url ~= "" then
+        self.document_source_urls[document_id] = source_url
+        logger.dbg("ReadwiseReader:storeSourceUrlMetadata: stored source_url for document", document_id)
+    else
+        self.document_source_urls[document_id] = nil
+    end
+
+    self:saveSettings()
+end
+
+function ReadwiseReader:getStoredSourceUrl(document_id)
+    if self.document_source_urls and self.document_source_urls[document_id] then
+        return self.document_source_urls[document_id]
+    end
+    return nil
+end
+
+function ReadwiseReader:removeSourceUrlMetadata(document_id)
+    if self.document_source_urls and self.document_source_urls[document_id] then
+        self.document_source_urls[document_id] = nil
+        logger.dbg("ReadwiseReader:removeSourceUrlMetadata: removed source_url metadata for document", document_id)
+        self:saveSettings()
+    end
+end
+
+function ReadwiseReader:getDocumentSourceUrlFromFile(filepath)
+    local doc_id = self:getDocumentIdFromPath(filepath)
+    if doc_id then
+        return self:getStoredSourceUrl(doc_id)
     end
     return nil
 end
@@ -348,10 +393,12 @@ function ReadwiseReader:createHighlights(booknotes)
         ["Authorization"] = "Token " .. self.access_token,
     }
 
-    -- Try to get the correct author from stored metadata
+    -- Try to get the correct author and source_url from stored metadata
     local correct_author = nil
+    local source_url = nil
     if booknotes.file then
         correct_author = self:getDocumentAuthorFromFile(booknotes.file)
+        source_url = self:getDocumentSourceUrlFromFile(booknotes.file)
     end
     
     -- Fallback to booknotes.author if no stored metadata, but clean it up
@@ -368,6 +415,7 @@ function ReadwiseReader:createHighlights(booknotes)
                 text = clipping.text,
                 title = booknotes.title,
                 author = correct_author,
+                source_url = source_url,
                 source_type = "koreader",
                 category = "articles",  -- Changed from "books" to "articles"
                 note = clipping.note,
@@ -1341,8 +1389,9 @@ function ReadwiseReader:cleanupArchivedDocuments()
         if local_filepath then
             logger.dbg("ReadwiseReader:cleanupArchivedDocuments: deleting locally archived document", doc.id, local_filepath)
             FileManager:deleteFile(local_filepath, true)
-            -- Remove author metadata for archived documents
+            -- Remove metadata for archived documents
             self:removeAuthorMetadata(doc.id)
+            self:removeSourceUrlMetadata(doc.id)
             deleted_count = deleted_count + 1
         end
     end
@@ -1369,6 +1418,7 @@ function ReadwiseReader:reconcileLocalDocuments(server_documents)
             logger.dbg("ReadwiseReader:reconcileLocalDocuments: removing", filepath, "- no longer matches server state")
             FileManager:deleteFile(filepath, true)
             self:removeAuthorMetadata(doc_id)
+            self:removeSourceUrlMetadata(doc_id)
             removed_count = removed_count + 1
         end
     end)
@@ -1394,6 +1444,9 @@ function ReadwiseReader:downloadDocument(document)
     
     -- Store author metadata from the API
     self:storeAuthorMetadata(document.id, document.author)
+
+    -- Store source URL for highlight export
+    self:storeSourceUrlMetadata(document.id, document.source_url)
 
     -- Get HTML content (already fetched in getDocumentList)
     local content = document.html_content
@@ -1864,8 +1917,9 @@ function ReadwiseReader:archiveDocument(document_id)
     
     if result then
         logger.dbg("ReadwiseReader:archiveDocument: successfully archived", document_id)
-        -- Remove author metadata when document is archived
+        -- Remove metadata when document is archived
         self:removeAuthorMetadata(document_id)
+        self:removeSourceUrlMetadata(document_id)
         return true
     else
         logger.err("ReadwiseReader:archiveDocument: failed to archive", document_id, err)
@@ -2091,6 +2145,7 @@ function ReadwiseReader:saveSettings()
         excluded_locations = self.excluded_locations,
         document_locations = self.document_locations,
         document_authors = self.document_authors,
+        document_source_urls = self.document_source_urls,
         download_images = self.download_images,
         max_image_size_mb = self.max_image_size_mb,
         max_articles_to_download = self.max_articles_to_download,
