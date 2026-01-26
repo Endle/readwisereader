@@ -31,7 +31,11 @@ local InputDialog = require("ui/widget/inputdialog")
 local JSON = require("json")
 local LuaSettings = require("luasettings")
 local MultiConfirmBox = require("ui/widget/multiconfirmbox")
-local ReadCollection = require("readcollection")
+local ok, ReadCollection = pcall(require, "readcollection")
+if not ok then
+    logger.warn("ReadwiseReader: ReadCollection module not available, collection management disabled")
+    ReadCollection = nil
+end
 local MyClipping = require("clip")
 local NetworkMgr = require("ui/network/manager")
 local ReadHistory = require("readhistory")
@@ -272,6 +276,9 @@ function ReadwiseReader:initCollectionTracking()
 end
 
 function ReadwiseReader:saveCollections()
+    if not ReadCollection then
+        return
+    end
     if next(self.modified_collections) then
         local count = 0
         for _ in pairs(self.modified_collections) do count = count + 1 end
@@ -282,7 +289,7 @@ function ReadwiseReader:saveCollections()
 end
 
 function ReadwiseReader:getCollectionNameForLocation(location)
-    if not location then
+    if not location or location == "" then
         return nil
     end
 
@@ -291,7 +298,7 @@ function ReadwiseReader:getCollectionNameForLocation(location)
 end
 
 function ReadwiseReader:ensureCollectionExists(location)
-    if not location then
+    if not ReadCollection or not location then
         return false
     end
 
@@ -307,7 +314,7 @@ function ReadwiseReader:ensureCollectionExists(location)
 end
 
 function ReadwiseReader:removeFromAllCollections(filepath)
-    if not filepath then
+    if not ReadCollection or not filepath then
         return
     end
 
@@ -324,6 +331,10 @@ function ReadwiseReader:removeFromAllCollections(filepath)
 end
 
 function ReadwiseReader:updateDocumentCollections(filepath, document)
+    if not ReadCollection then
+        return false
+    end
+
     if not filepath or not document then
         logger.dbg("ReadwiseReader:updateDocumentCollections: missing filepath or document")
         return false
@@ -1450,20 +1461,27 @@ function ReadwiseReader:cleanupArchivedDocuments()
     end
     
     local deleted_count = 0
-    
+
+    -- Initialize collection tracking if not already done
+    if not self.modified_collections then
+        self:initCollectionTracking()
+    end
+
     for _, doc in ipairs(archived_docs) do
         local local_filepath = self:findLocalDocumentByReadwiseId(doc.id)
-        
+
         if local_filepath then
             logger.dbg("ReadwiseReader:cleanupArchivedDocuments: deleting locally archived document", doc.id, local_filepath)
             self:removeFromAllCollections(local_filepath)
+            -- Save collections immediately before deleting file to prevent orphaned references
+            self:saveCollections()
             FileManager:deleteFile(local_filepath, true)
             -- Remove author metadata for archived documents
             self:removeAuthorMetadata(doc.id)
             deleted_count = deleted_count + 1
         end
     end
-    
+
     logger.dbg("ReadwiseReader:cleanupArchivedDocuments: deleted", deleted_count, "locally archived documents")
     return deleted_count
 end
@@ -1559,7 +1577,11 @@ function ReadwiseReader:downloadDocument(document)
             logger.warn("ReadwiseReader:downloadDocument: metadata writing failed:", err)
         end
 
-        self:updateDocumentCollections(filepath, document)
+        -- Update KOReader collections
+        local coll_status, coll_err = pcall(function() self:updateDocumentCollections(filepath, document) end)
+        if not coll_status then
+            logger.warn("ReadwiseReader:downloadDocument: collection update failed:", coll_err)
+        end
 
         return "downloaded"
     else
@@ -2127,9 +2149,9 @@ function ReadwiseReader:synchronize()
 
     for i, document in ipairs(filtered_documents) do
         self:showProgress(string.format("Downloading %d of %d: %s", i, #filtered_documents, document.title))
-        
+
         local result = self:downloadDocument(document)
-        
+
         if result == "downloaded" then
             downloaded = downloaded + 1
         elseif result == "skipped" then
@@ -2137,8 +2159,14 @@ function ReadwiseReader:synchronize()
         else
             failed = failed + 1
         end
+
+        -- Periodically save collection changes to prevent data loss on crash
+        if i % 10 == 0 then
+            self:saveCollections()
+        end
     end
 
+    -- Final save for any remaining collection changes
     self:saveCollections()
 
     self:hideProgress()
