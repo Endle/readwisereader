@@ -279,11 +279,11 @@ function ReadwiseReader:setDocumentMetadata(filepath, document)
     local custom_doc_settings = DocSettings.openSettingsFile()
     local props = {}
 
-    if document.title and document.title ~= "" then
+    if type(document.title) == "string" and document.title ~= "" then
         props.title = document.title
     end
 
-    if document.author and document.author ~= "" then
+    if type(document.author) == "string" and document.author ~= "" then
         props.authors = document.author
     end
 
@@ -292,11 +292,11 @@ function ReadwiseReader:setDocumentMetadata(filepath, document)
         logger.dbg("ReadwiseReader:setDocumentMetadata: set keywords:", props.keywords)
     end
 
-    if document.summary and document.summary ~= "" then
+    if type(document.summary) == "string" and document.summary ~= "" then
         props.description = document.summary
     end
 
-    if document.site_name and document.site_name ~= "" then
+    if type(document.site_name) == "string" and document.site_name ~= "" then
         props.series = document.site_name
     end
 
