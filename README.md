@@ -1,3 +1,6 @@
+I no longer use Readwise Reader, so I am not in a position to maintain this plugin. Therefore it is archived. 
+Please note that the license allows it be to forked/shared by others - feel free to do so.
+
 # A KOReader plugin for Readwise and Readwise Reader
 A plugin for KOReader integration with the highlight saving and read later services Readwise and Readwise Reader. A Readwise subscription is required. 
 
