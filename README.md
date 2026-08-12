@@ -18,10 +18,10 @@ A plugin for KOReader integration with the highlight saving and read later servi
 - I am not planning to add any options to style the documents. However there are lots of tweaks you can apply as a user - see [here](https://koreader.rocks/user_guide/#L1-customizingappearance). 
 
 ## Installation:
-- Download the ZIP file of the plugin [here](https://github.com/tomtom800/readwisereader/archive/refs/heads/main.zip). Extract it.
+- Download the [ZIP of the plugin](https://github.com/tomtom800/readwisereader/archive/refs/heads/main.zip). Extract it.
 - Attach your ereader to your computer. Copy the `readwisereader.koplugin` folder containing _meta.lua and main.lua from the extracted folder to the `koreader/plugins` folder. Restart KOReader.
-- The plugin requires a Readwise access token, which subscribers can obtain  [here](https://readwise.io/access_token). 
-- The token can be typed in manually in the Readwise Reader/Settings/Configure Readwise Reader menu, but this is difficult to do correctly. The letter O and the number 0, are easily confused as are the lowercase letter l, the uppercase letter I and the numeral 1. If the plugin is not working, check this first.
+- The plugin requires a Readwise access token, which subscribers can obtain [here](https://readwise.io/access_token).
+- The token can be typed in manually in the Readwise Reader/Settings/Configure Readwise Reader menu, but this is difficult to do correctly. It's easy to be confused by the letter O and the number 0, or the lowercase letter l, the uppercase letter I and the numeral 1. If the plugin is not working, check this first.
 - You may prefer to copy and paste the access token directly from your computer into KOReader settings. To do this, first set the folder you want to download to in the Readwise Reader/Settings/Download folder menu. This will create the file koreader/settings/readwisereader.lua. Add the access token to this file in the following format:
 
 ```
@@ -46,3 +46,15 @@ return {
 
 ## Bug reporting
 If reporting a bug, especially one that causes KOReader to crash, please share logging from your device in koreader/crash.log. Errors and crashes are clearly marked. To ensure that you just capture the relevant logs, delete the file, let KOReader regenerate it for you, then save the file after the issue has occurred.
+
+## Development
+Notes for devs and power-users. Don't proceed unless you know the meaning of each step.
+
+### Test KOReader on Linux PC
+KOReader has [Linux release](https://github.com/koreader/koreader/wiki/Installation-on-desktop-linux), so it's a breeze to test this plugin on Linux.
+
+1. Install KOReader [via Flatpak](https://flathub.org/en/apps/rocks.koreader.KOReader)
+2. `git clone git@github.com:Endle/readwisereader.git`
+3. Check plugin directory `$HOME/.var/app/rocks.koreader.KOReader/config/koreader/plugins` - Thanks to [MountainToppish](https://www.reddit.com/r/koreader/comments/1mt7g9x/how_to_add_plugins_to_koreader_installed_from/)
+4. Install the plugin by `cd  $HOME/.var/app/rocks.koreader.KOReader/config/koreader/plugins && ln -s $HOME/<source_path>/readwisereader.koplugin`
+5. Restart KOReader
