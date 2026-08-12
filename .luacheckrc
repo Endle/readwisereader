@@ -7,7 +7,7 @@ std = "luajit"
 
 max_line_length = false
 
--- Existing debt, deliberately not gated on. The value of this lint run is
+-- Existing debt (as of 2026-Aug), deliberately not gated on. The value of this lint run is
 -- catching undefined variables (real crashes on device); the categories below
 -- are cosmetic and would bury that signal in ~200 warnings. Burn them down and
 -- delete the corresponding line to start enforcing it.
