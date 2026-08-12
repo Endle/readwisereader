@@ -19,6 +19,9 @@
 -- - Configurable article download limit to control sync size
 -- ===============================================================================
 
+-- logger is required first: it is used by the ReadCollection fallback below
+local logger = require("logger")
+
 local BD = require("ui/bidi")
 local DataStorage = require("datastorage")
 local Dispatcher = require("dispatcher")
@@ -46,7 +49,6 @@ local Device = require("device")
 local filemanagerutil = require("apps/filemanager/filemanagerutil")
 local http = require("socket.http")
 local lfs = require("libs/libkoreader-lfs")
-local logger = require("logger")
 local ltn12 = require("ltn12")
 local mime = require("mime")
 local rapidjson = require("rapidjson")
@@ -1271,8 +1273,10 @@ function ReadwiseReader:callAPI(method, endpoint, body, quiet)
         sink = ltn12.sink.table(sink),
     }
     
+    -- kept in scope for the retry loop below, which has to rebuild the source
+    local json_body
     if body then
-        local json_body = JSON.encode(body)
+        json_body = JSON.encode(body)
         request.source = ltn12.source.string(json_body)
         request.headers["Content-Length"] = tostring(#json_body)
     end
