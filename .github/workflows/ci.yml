@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  lint:
+    name: Lint and syntax check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Upstream luacheck's own action; reads .luacheckrc from the repo root.
+      - name: Luacheck
+        uses: lunarmodules/luacheck@v1
+        with:
+          args: readwisereader.koplugin/
+
+      # luacheck's parser accepts newer Lua syntax that LuaJIT would reject, so
+      # compile against the runtime KOReader actually ships. A syntax error here
+      # would otherwise reach users as a silent plugin-load failure on device.
+      - name: Install LuaJIT
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends luajit
+
+      - name: Syntax check
+        run: |
+          status=0
+          for f in $(git ls-files '*.lua'); do
+            if ! luajit -e "assert(loadfile('$f'))"; then
+              echo "::error file=$f::failed to compile"
+              status=1
+            fi
+          done
+          exit $status
