@@ -12,21 +12,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # KOReader ships LuaJIT; check against the same runtime users get.
-      - uses: leafo/gh-actions-lua@v10
-        with:
-          luaVersion: "luajit-2.1"
-
-      - uses: leafo/gh-actions-luarocks@v5
-
-      - name: Install luacheck
-        run: luarocks install luacheck
-
+      # Upstream luacheck's own action; reads .luacheckrc from the repo root.
       - name: Luacheck
-        run: luacheck readwisereader.koplugin/
+        uses: lunarmodules/luacheck@v1
+        with:
+          args: readwisereader.koplugin/
 
-      # A syntax error here ships as a silent plugin-load failure on device,
-      # so compile every Lua file the repo tracks.
+      # luacheck's parser accepts newer Lua syntax that LuaJIT would reject, so
+      # compile against the runtime KOReader actually ships. A syntax error here
+      # would otherwise reach users as a silent plugin-load failure on device.
+      - name: Install LuaJIT
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends luajit
+
       - name: Syntax check
         run: |
           status=0
