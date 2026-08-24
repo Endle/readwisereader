@@ -1292,48 +1292,41 @@ function ReadwiseReader:callAPI(method, endpoint, body, quiet)
         url = API_ENDPOINT .. endpoint,
         method = method,
         headers = headers,
-        sink = ltn12.sink.table(sink),
     }
-    
-    -- kept in scope for the retry loop below, which has to rebuild the source
+
+    -- kept in scope so every attempt can rebuild the single-use source
     local json_body
     if body then
         json_body = JSON.encode(body)
-        request.source = ltn12.source.string(json_body)
         request.headers["Content-Length"] = tostring(#json_body)
     end
-    
-    logger.dbg("ReadwiseReader:callAPI:", method, endpoint)
-    
-    -- Apply rate limiting before making the call
-    self:checkRateLimit()
 
-    -- Retry logic for HTTPS/wantread errors (common on Kindle devices)
-    local max_retries = 3
-    local retry_delay = 2  -- seconds
+    logger.dbg("ReadwiseReader:callAPI:", method, endpoint)
+
+    local max_attempts = 3
     local code, resp_headers, status
 
-    for attempt = 1, max_retries do
+    for attempt = 1, max_attempts do
+        sink = {}
+        request.sink = ltn12.sink.table(sink)
+        if body then
+            request.source = ltn12.source.string(json_body)
+        end
+
+        self:checkRateLimit()
         socketutil:set_timeout(10, 60)
         code, resp_headers, status = socket.skip(1, http.request(request))
         socketutil:reset_timeout()
 
-        -- If we got a response, break out of retry loop
-        if resp_headers ~= nil then
-            break
-        end
+        if attempt == max_attempts then break end
 
-        -- Check if it's a wantread error (HTTPS issue on Kindle)
-        local error_msg = tostring(status or code or "")
-        if error_msg:match("wantread") and attempt < max_retries then
-            logger.dbg("ReadwiseReader:callAPI: wantread error, retrying", attempt, "of", max_retries)
-            socket.sleep(retry_delay)
-            -- Recreate sink for retry
-            sink = {}
-            request.sink = ltn12.sink.table(sink)
-            if body then
-                request.source = ltn12.source.string(json_body)
-            end
+        if resp_headers == nil then
+            -- network layer: only the Kindle TLS "wantread" error is worth retrying
+            if not tostring(status or code or ""):match("wantread") then break end
+            logger.dbg("ReadwiseReader:callAPI: wantread error, attempt", attempt, "of", max_attempts)
+            socket.sleep(2)
+        elseif code == 429 then
+            self:handleRetryAfter(code, resp_headers)  -- sleeps for Retry-After
         else
             break
         end
@@ -1345,15 +1338,6 @@ function ReadwiseReader:callAPI(method, endpoint, body, quiet)
             UIManager:show(InfoMessage:new{ text = "Network error connecting to Readwise Reader." })
         end
         return nil, "network_error"
-    end
-    
-    -- Handle rate limiting with retry
-    if self:handleRetryAfter(code, resp_headers) then
-        -- Retry the request once after rate limit delay
-        logger.dbg("ReadwiseReader:callAPI: retrying after rate limit")
-        socketutil:set_timeout(10, 60)
-        code, resp_headers, status = socket.skip(1, http.request(request))
-        socketutil:reset_timeout()
     end
     
     if code == 200 or code == 204 then
