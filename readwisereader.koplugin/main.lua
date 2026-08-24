@@ -64,6 +64,28 @@ local HIGHLIGHTS_API_ENDPOINT = "https://readwise.io/api/v2"
 local article_id_prefix = "[rw-id_"
 local article_id_postfix = "] "
 
+-- Both JSON decoders represent null as a *truthy* sentinel (LuaJSON a function,
+-- rapidjson a lightuserdata), so `x or "default"` guards silently pass it through.
+local JSON_NULL = JSON.util and JSON.util.null
+local RAPIDJSON_NULL = rapidjson.null
+
+local function stripJsonNulls(value)
+    if value == JSON_NULL or value == RAPIDJSON_NULL then
+        return nil
+    end
+    if type(value) ~= "table" then
+        return value
+    end
+    for k, v in pairs(value) do
+        if v == JSON_NULL or v == RAPIDJSON_NULL then
+            value[k] = nil
+        elseif type(v) == "table" then
+            stripJsonNulls(v)
+        end
+    end
+    return value
+end
+
 local ReadwiseReader = WidgetContainer:extend{
     name = "readwisereader",
     is_doc_only = false,
@@ -483,7 +505,7 @@ function ReadwiseReader:makeJsonRequest(endpoint, method, body, headers)
         return nil, "Unable to decode server response: " .. (err or "unknown error")
     end
 
-    return response
+    return stripJsonNulls(response)
 end
 
 function ReadwiseReader:getDocumentClippings()
@@ -1338,7 +1360,10 @@ function ReadwiseReader:callAPI(method, endpoint, body, quiet)
         local content = table.concat(sink)
         if content ~= "" then
             local ok, result = pcall(JSON.decode, content)
-            if ok and result then
+            if ok then
+                result = stripJsonNulls(result)
+            end
+            if ok and result ~= nil then
                 return result
             else
                 logger.err("ReadwiseReader:callAPI: invalid JSON response")
