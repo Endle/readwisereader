@@ -149,7 +149,7 @@ function ReadwiseReader:init()
             extendProps = function(props) return props or {} end
         }
     }
-    self.parser = MyClipping:new{ ui = mock_ui }
+    self.parser = MyClipping:new{ ui = mock_ui, settings = {} }
     
     self.ui.menu:registerToMainMenu(self)
 end
@@ -496,11 +496,14 @@ function ReadwiseReader:makeJsonRequest(endpoint, method, body, headers)
         return nil, "Request failed: " .. (status or code or "network unreachable")
     end
 
-    if not sink[1] then
+    -- ltn12 delivers the body in BLOCKSIZE (2048 byte) chunks, so sink[1] is only the
+    -- first one; anything larger has to be joined before it will parse.
+    local content = table.concat(sink)
+    if content == "" then
         return nil, "No response from server"
     end
 
-    response, err = rapidjson.decode(sink[1])
+    response, err = rapidjson.decode(content)
     if not response then
         return nil, "Unable to decode server response: " .. (err or "unknown error")
     end
@@ -514,7 +517,16 @@ end
 
 function ReadwiseReader:parseAllBooks()
     local clippings = {}
-    
+
+    -- parseHistory reads annotations from the .sdr files on disk, so we need to flush
+    if self.ui and self.ui.document and self.ui.saveSettings then
+        logger.dbg("ReadwiseReader:parseAllBooks: flushing open document before parsing")
+        local ok, err = pcall(function() self.ui:saveSettings() end)
+        if not ok then
+            logger.warn("ReadwiseReader:parseAllBooks: could not flush open document:", err)
+        end
+    end
+
     -- Parse from history
     local history_clippings = self.parser:parseHistory()
     for title, booknotes in pairs(history_clippings) do
@@ -2155,13 +2167,25 @@ function ReadwiseReader:synchronize()
         local success, clippings = pcall(function() return self:parseAllBooks() end)
         if success then
             if next(clippings) ~= nil then
-                highlights_exported, _ = self:exportToReadwise(clippings)
+                -- must not be `_`: that is the gettext upvalue, and overwriting it
+                -- breaks every later _("...") call
+                local errors
+                highlights_exported, errors = self:exportToReadwise(clippings)
+                if errors and #errors > 0 then
+                    logger.warn("ReadwiseReader:synchronize: highlight export errors:", table.concat(errors, "; "))
+                    UIManager:show(InfoMessage:new{
+                        text = string.format("Highlight export failed for %d book(s):\n%s",
+                            #errors, errors[1]),
+                        timeout = 5
+                    })
+                end
             end
         else
             logger.warn("ReadwiseReader:synchronize: error parsing books for highlights:", clippings)
             UIManager:show(InfoMessage:new{
-                text = "Note: Highlight export failed, but continuing with article sync.",
-                timeout = 3
+                text = string.format("Note: Highlight export failed, but continuing with article sync.\n%s",
+                    tostring(clippings)),
+                timeout = 5
             })
         end
         self:hideProgress()
