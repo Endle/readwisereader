@@ -33,6 +33,7 @@ local InfoMessage = require("ui/widget/infomessage")
 local InputDialog = require("ui/widget/inputdialog")
 local JSON = require("json")
 local LuaSettings = require("luasettings")
+local ConfirmBox = require("ui/widget/confirmbox")
 local MultiConfirmBox = require("ui/widget/multiconfirmbox")
 local ok, ReadCollection = pcall(require, "readcollection")
 if not ok then
@@ -109,7 +110,8 @@ function ReadwiseReader:init()
     local settings = self.readwise_settings:readSetting("readwisereader") or {}
     self.access_token = settings.access_token
     self.directory = settings.directory
-    self.archive_finished = settings.archive_finished
+    -- on by default; `~= false` keeps an explicit opt-out working
+    self.archive_finished = settings.archive_finished ~= false
     self.export_highlights_at_sync = settings.export_highlights_at_sync or false
     self.last_sync_time = settings.last_sync_time
     
@@ -118,7 +120,10 @@ function ReadwiseReader:init()
     self.document_tags = settings.document_tags or {}
     self.document_categories = settings.document_categories or {}
     
-    self.available_locations = settings.available_locations or {}
+    -- Bootstrap so "Include in sync" has something to show before the first sync.
+    -- These are exactly the locations getDocumentList fetches; updateAvailableTags
+    -- replaces the list wholesale once a sync has discovered the real library.
+    self.available_locations = settings.available_locations or {"new", "later", "shortlist"}
     self.excluded_locations = settings.excluded_locations or {}
     self.document_locations = settings.document_locations or {}
     
@@ -515,6 +520,21 @@ function ReadwiseReader:getDocumentClippings()
     return self.parser:parseCurrentDoc(self.view) or {}
 end
 
+-- Entry point shared by the Advanced sync actions. They bypass synchronize(), so they
+-- must do for themselves what it does at its top: get online, validate settings, and
+-- reset the per-session rate-limit counters.
+function ReadwiseReader:runSyncAction(action)
+    NetworkMgr:runWhenOnline(function()
+        if not self:validateSettings() then
+            return
+        end
+        self.api_call_count = 0
+        self.sync_start_time = nil
+        self.needs_rate_limiting = false
+        action()
+    end)
+end
+
 function ReadwiseReader:parseAllBooks()
     local clippings = {}
 
@@ -604,6 +624,39 @@ function ReadwiseReader:createHighlights(booknotes)
     return true
 end
 
+-- Runs the highlight export pipeline. Returns the count exported and, on a parse
+-- failure, the error -- the caller words that message, since "continuing with article
+-- sync" is only true on the sync path.
+function ReadwiseReader:exportHighlights()
+    self:showProgress("Exporting highlights to Readwise...")
+
+    local exported = 0
+    local success, clippings = pcall(function() return self:parseAllBooks() end)
+    if not success then
+        self:hideProgress()
+        logger.warn("ReadwiseReader:exportHighlights: error parsing books for highlights:", clippings)
+        return 0, clippings
+    end
+
+    if next(clippings) ~= nil then
+        -- must not be `_`: that is the gettext upvalue, and overwriting it
+        -- breaks every later _("...") call
+        local errors
+        exported, errors = self:exportToReadwise(clippings)
+        if errors and #errors > 0 then
+            logger.warn("ReadwiseReader:exportHighlights: highlight export errors:", table.concat(errors, "; "))
+            UIManager:show(InfoMessage:new{
+                text = string.format("Highlight export failed for %d book(s):\n%s",
+                    #errors, errors[1]),
+                timeout = 5
+            })
+        end
+    end
+
+    self:hideProgress()
+    return exported, nil
+end
+
 function ReadwiseReader:exportToReadwise(clippings)
     local exportables = {}
     for _title, booknotes in pairs(clippings) do
@@ -638,7 +691,7 @@ function ReadwiseReader:addToMainMenu(menu_items)
         text = "Readwise Reader",
         sub_item_table = {
             {
-                text = "Sync articles",
+                text = "Sync now",
                 callback = function()
                     self.ui:handleEvent(Event:new("SynchronizeReadwiseReader"))
                 end,
@@ -658,6 +711,107 @@ function ReadwiseReader:addToMainMenu(menu_items)
                 enabled_func = function()
                     return self.directory and self.directory ~= ""
                 end,
+            },
+            {
+                -- Advanced sync runs one step of the sync pipeline on demand.
+                -- INVARIANT: every item here runs unconditionally. The toggles in
+                -- Settings gate what "Sync now" does; picking an item here is an
+                -- explicit request, so it must not consult the matching toggle.
+                text = "Advanced sync",
+                sub_item_table = {
+                    {
+                        text = "Export highlights to Readwise",
+                        callback = function()
+                            self:runSyncAction(function()
+                                local exported, parse_err = self:exportHighlights()
+                                if parse_err then
+                                    UIManager:show(InfoMessage:new{
+                                        text = string.format("Highlight export failed.\n%s",
+                                            tostring(parse_err)),
+                                        timeout = 5
+                                    })
+                                else
+                                    UIManager:show(InfoMessage:new{
+                                        text = string.format("Exported %d highlight(s).", exported),
+                                        timeout = 3
+                                    })
+                                end
+                            end)
+                        end,
+                    },
+                    {
+                        text = "Archive finished articles on Readwise",
+                        help_text = "Articles you have marked finished here are archived on Readwise and removed from this device.",
+                        callback = function()
+                            self:runSyncAction(function()
+                                local pending = self:countFinishedDocuments()
+                                if pending == 0 then
+                                    UIManager:show(InfoMessage:new{
+                                        text = "No finished articles to archive.",
+                                        timeout = 3
+                                    })
+                                    return
+                                end
+                                UIManager:show(ConfirmBox:new{
+                                    text = string.format(
+                                        "Archive %d finished article(s) on Readwise and remove them from this device?",
+                                        pending),
+                                    ok_text = "Archive",
+                                    ok_callback = function()
+                                        self:showProgress("Processing finished articles…")
+                                        local archived_count = self:processFinishedDocuments()
+                                        self:hideProgress()
+                                        UIManager:show(InfoMessage:new{
+                                            text = string.format("Archived %d article(s).", archived_count),
+                                            timeout = 3
+                                        })
+                                    end,
+                                })
+                            end)
+                        end,
+                    },
+                    {
+                        text = "Delete local copies of archived articles",
+                        help_text = "Removes downloads for articles you archived in Reader. Only those archived since your last sync.",
+                        -- cleanupArchivedDocuments asks the server for documents archived
+                        -- since last_sync_time, so it has nothing to compare against
+                        -- before the first sync. Grey out rather than silently no-op.
+                        enabled_func = function()
+                            return self.last_sync_time ~= nil
+                        end,
+                        callback = function()
+                            self:runSyncAction(function()
+                                local targets = self:collectArchivedForCleanup()
+                                self:hideProgress()
+                                if not targets then
+                                    UIManager:show(InfoMessage:new{
+                                        text = "Could not reach Readwise to check for archived articles.",
+                                        timeout = 3
+                                    })
+                                    return
+                                end
+                                if #targets == 0 then
+                                    UIManager:show(InfoMessage:new{
+                                        text = "No local copies to remove.",
+                                        timeout = 3
+                                    })
+                                    return
+                                end
+                                UIManager:show(ConfirmBox:new{
+                                    text = string.format("Delete %d local article(s)?", #targets),
+                                    ok_text = "Delete",
+                                    ok_callback = function()
+                                        local cleaned = self:deleteArchivedDocuments(targets)
+                                        UIManager:show(InfoMessage:new{
+                                            text = string.format("Removed %d local article(s).", cleaned),
+                                            timeout = 3
+                                        })
+                                    end,
+                                })
+                            end)
+                        end,
+                    },
+                },
             },
             {
                 text = "Settings",
@@ -750,7 +904,7 @@ function ReadwiseReader:addToMainMenu(menu_items)
                         end,
                     },
                     {
-                        text = "Exclude from sync",
+                        text = "Include in sync",
                         sub_item_table_func = function()
                             return self:getExclusionMenuItems()
                         end,
@@ -758,7 +912,7 @@ function ReadwiseReader:addToMainMenu(menu_items)
                 }
             },
             {
-                text = "Version 2.4",
+                text = "Version 2.5",
                 enabled = false,
             },
         },
@@ -773,7 +927,7 @@ function ReadwiseReader:getExclusionMenuItems()
     local menu_items = {}
     
     table.insert(menu_items, {
-        text = "Exclude documents of these types or tags:",
+        text = "Sync documents of these types and tags:",
     })
     
     if #self.available_locations > 0 then
@@ -793,13 +947,14 @@ function ReadwiseReader:getExclusionMenuItems()
             table.insert(menu_items, {
                 text = display_location,
                 checked_func = function()
-                    -- Check if location is in excluded list
+                    -- Ticked means included. Storage stays exclusion-based, so a
+                    -- location absent from excluded_locations is one we sync.
                     for _, excluded_location in ipairs(self.excluded_locations) do
                         if excluded_location == location then
-                            return true
+                            return false
                         end
                     end
-                    return false
+                    return true
                 end,
                 callback = function()
                     -- Toggle location exclusion
@@ -850,7 +1005,7 @@ function ReadwiseReader:getExclusionMenuItems()
             table.insert(menu_items, {
                 text = display_tag,
                 checked_func = function()
-                    return self:isTagExcluded(tag)
+                    return not self:isTagExcluded(tag)
                 end,
                 callback = function()
                     self:toggleTagExclusion(tag)
@@ -871,7 +1026,7 @@ function ReadwiseReader:getExclusionMenuItems()
             table.insert(menu_items, {
                 text = display_tag,
                 checked_func = function()
-                    return self:isTagExcluded(tag)
+                    return not self:isTagExcluded(tag)
                 end,
                 callback = function()
                     self:toggleTagExclusion(tag)
@@ -915,7 +1070,26 @@ function ReadwiseReader:toggleLocationExclusion(location)
     self:saveSettings()
 end
 
+-- Unticking a location in "Include in sync" removes its downloads. Destructive enough
+-- to ask, and rare enough that asking is not tedious. Confirmed on the user gesture
+-- only; the sync path never prompts.
 function ReadwiseReader:deleteArticlesWithLocation(location)
+    local pending = self:countDocumentsWithLocation(location)
+    if pending == 0 then
+        return
+    end
+
+    UIManager:show(ConfirmBox:new{
+        text = string.format("Remove %d downloaded article(s) in '%s' from this device?",
+            pending, location),
+        ok_text = "Remove",
+        ok_callback = function()
+            self:performDeleteArticlesWithLocation(location)
+        end,
+    })
+end
+
+function ReadwiseReader:performDeleteArticlesWithLocation(location)
     local deleted_count = 0
     
     self:forEachLocalDocument(function(doc_id, filepath)
@@ -935,6 +1109,16 @@ function ReadwiseReader:deleteArticlesWithLocation(location)
             FileManager.instance:onRefresh()
         end
     end
+end
+
+function ReadwiseReader:countDocumentsWithLocation(location)
+    local count = 0
+    self:forEachLocalDocument(function(doc_id, _filepath)
+        if self:documentHasLocation(doc_id, location) then
+            count = count + 1
+        end
+    end)
+    return count
 end
 
 function ReadwiseReader:documentHasLocation(doc_id, location)
@@ -1522,46 +1706,64 @@ function ReadwiseReader:findLocalDocumentByReadwiseId(readwise_id)
     end)
 end
 
-function ReadwiseReader:cleanupArchivedDocuments()
+-- Which local files belong to documents archived on Readwise since the last sync.
+-- Split out from the delete so a caller can show an exact count before destroying
+-- anything. Returns {} when there is nothing to do, nil when the server was unreachable.
+function ReadwiseReader:collectArchivedForCleanup()
     if not self.last_sync_time then
-        logger.dbg("ReadwiseReader:cleanupArchivedDocuments: no previous sync time, skipping cleanup")
-        return 0
+        logger.dbg("ReadwiseReader:collectArchivedForCleanup: no previous sync time, skipping cleanup")
+        return {}
     end
-    
-    self:showProgress("Checking for archived articles…")
-    
-    local archived_docs = self:getArchivedDocuments(self.last_sync_time)
-    
-    if not archived_docs then
-        logger.err("ReadwiseReader:cleanupArchivedDocuments: failed to get archived documents")
-        return 0
-    end
-    
-    local deleted_count = 0
 
+    self:showProgress("Checking for archived articles…")
+
+    local archived_docs = self:getArchivedDocuments(self.last_sync_time)
+
+    if not archived_docs then
+        logger.err("ReadwiseReader:collectArchivedForCleanup: failed to get archived documents")
+        return nil
+    end
+
+    local targets = {}
+    for _, doc in ipairs(archived_docs) do
+        local local_filepath = self:findLocalDocumentByReadwiseId(doc.id)
+        if local_filepath then
+            table.insert(targets, { id = doc.id, filepath = local_filepath })
+        end
+    end
+
+    return targets
+end
+
+function ReadwiseReader:deleteArchivedDocuments(targets)
     -- Initialize collection tracking if not already done
     if not self.modified_collections then
         self:initCollectionTracking()
     end
 
-    for _, doc in ipairs(archived_docs) do
-        local local_filepath = self:findLocalDocumentByReadwiseId(doc.id)
-
-        if local_filepath then
-            logger.dbg("ReadwiseReader:cleanupArchivedDocuments: deleting locally archived document", doc.id, local_filepath)
-            self:removeFromAllCollections(local_filepath)
-            -- Save collections immediately before deleting file to prevent orphaned references
-            self:saveCollections()
-            FileManager:deleteFile(local_filepath, true)
-            -- Remove metadata for archived documents
-            self:removeAuthorMetadata(doc.id)
-            self:removeSourceUrlMetadata(doc.id)
-            deleted_count = deleted_count + 1
-        end
+    local deleted_count = 0
+    for _, target in ipairs(targets) do
+        logger.dbg("ReadwiseReader:deleteArchivedDocuments: deleting locally archived document", target.id, target.filepath)
+        self:removeFromAllCollections(target.filepath)
+        -- Save collections immediately before deleting file to prevent orphaned references
+        self:saveCollections()
+        FileManager:deleteFile(target.filepath, true)
+        -- Remove metadata for archived documents
+        self:removeAuthorMetadata(target.id)
+        self:removeSourceUrlMetadata(target.id)
+        deleted_count = deleted_count + 1
     end
 
-    logger.dbg("ReadwiseReader:cleanupArchivedDocuments: deleted", deleted_count, "locally archived documents")
+    logger.dbg("ReadwiseReader:deleteArchivedDocuments: deleted", deleted_count, "locally archived documents")
     return deleted_count
+end
+
+function ReadwiseReader:cleanupArchivedDocuments()
+    local targets = self:collectArchivedForCleanup()
+    if not targets then
+        return 0
+    end
+    return self:deleteArchivedDocuments(targets)
 end
 
 function ReadwiseReader:reconcileLocalDocuments(server_documents)
@@ -2115,11 +2317,23 @@ function ReadwiseReader:getDocumentIdFromPath(filepath)
     return id
 end
 
+function ReadwiseReader:countFinishedDocuments()
+    local count = 0
+    self:forEachLocalDocument(function(_doc_id, filepath)
+        if DocSettings:hasSidecarFile(filepath) then
+            local doc_settings = DocSettings:open(filepath)
+            local summary = doc_settings:readSetting("summary")
+            if summary and summary.status == "complete" then
+                count = count + 1
+            end
+        end
+    end)
+    return count
+end
+
+-- Unconditional by design: the archive_finished toggle is checked by synchronize(),
+-- so that the Advanced sync action can run this regardless of the setting.
 function ReadwiseReader:processFinishedDocuments()
-    if not self.archive_finished then
-        return 0, 0
-    end
-    
     local archived_count = 0
     local deleted_count = 0
     
@@ -2163,38 +2377,24 @@ function ReadwiseReader:synchronize()
     -- Export highlights if enabled
     local highlights_exported = 0
     if self.export_highlights_at_sync then
-        self:showProgress("Exporting highlights to Readwise...")
-        local success, clippings = pcall(function() return self:parseAllBooks() end)
-        if success then
-            if next(clippings) ~= nil then
-                -- must not be `_`: that is the gettext upvalue, and overwriting it
-                -- breaks every later _("...") call
-                local errors
-                highlights_exported, errors = self:exportToReadwise(clippings)
-                if errors and #errors > 0 then
-                    logger.warn("ReadwiseReader:synchronize: highlight export errors:", table.concat(errors, "; "))
-                    UIManager:show(InfoMessage:new{
-                        text = string.format("Highlight export failed for %d book(s):\n%s",
-                            #errors, errors[1]),
-                        timeout = 5
-                    })
-                end
-            end
-        else
-            logger.warn("ReadwiseReader:synchronize: error parsing books for highlights:", clippings)
+        local parse_err
+        highlights_exported, parse_err = self:exportHighlights()
+        if parse_err then
             UIManager:show(InfoMessage:new{
                 text = string.format("Note: Highlight export failed, but continuing with article sync.\n%s",
-                    tostring(clippings)),
+                    tostring(parse_err)),
                 timeout = 5
             })
         end
-        self:hideProgress()
     end
     
     local cleaned_count = self:cleanupArchivedDocuments()
     
-    self:showProgress("Processing finished articles…")
-    local archived_count, deleted_count = self:processFinishedDocuments()
+    local archived_count, deleted_count = 0, 0
+    if self.archive_finished then
+        self:showProgress("Processing finished articles…")
+        archived_count, deleted_count = self:processFinishedDocuments()
+    end
     
     self:showProgress("Getting document list…")
     local documents = self:getDocumentList()
