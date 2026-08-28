@@ -18,7 +18,7 @@ A plugin for KOReader integration with the highlight saving and read later servi
 - I am not planning to add any options to style the documents. However there are lots of tweaks you can apply as a user - see [here](https://koreader.rocks/user_guide/#L1-customizingappearance). 
 
 ## Installation:
-- Download the [ZIP of the plugin](https://github.com/tomtom800/readwisereader/archive/refs/heads/main.zip). Extract it.
+- Download the [ZIP of the plugin](https://github.com/Endle/readwisereader/releases/). Extract it.
 - Attach your ereader to your computer. Copy the `readwisereader.koplugin` folder containing _meta.lua and main.lua from the extracted folder to the `koreader/plugins` folder. Restart KOReader.
 - The plugin requires a Readwise access token, which subscribers can obtain [here](https://readwise.io/access_token).
 - The token can be typed in manually in the Readwise Reader/Settings/Configure Readwise Reader menu, but this is difficult to do correctly. It's easy to be confused by the letter O and the number 0, or the lowercase letter l, the uppercase letter I and the numeral 1. If the plugin is not working, check this first.
