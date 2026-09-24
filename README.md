@@ -21,7 +21,7 @@ A plugin for KOReader integration with the highlight saving and read later servi
 
 ## Installation:
 - Download the [ZIP of the plugin](https://github.com/Endle/readwisereader/releases/). Extract it.
-- Attach your ereader to your computer. Copy the `readwisereader.koplugin` folder containing _meta.lua and main.lua from the extracted folder to the `koreader/plugins` folder. Restart KOReader.
+- Attach your ereader to your computer. Copy the entire `readwisereader.koplugin` folder, including its `readwisereader` subdirectory, to the `koreader/plugins` folder. Restart KOReader.
 - The plugin requires a Readwise access token, which subscribers can obtain [here](https://readwise.io/access_token).
 - The token can be typed in manually in the Readwise Reader/Settings/Configure Readwise Reader menu, but this is difficult to do correctly. It's easy to be confused by the letter O and the number 0, or the lowercase letter l, the uppercase letter I and the numeral 1. If the plugin is not working, check this first.
 - You may prefer to copy and paste the access token directly from your computer into KOReader settings. To do this, first set the folder you want to download to in the Readwise Reader/Settings/Download folder menu. This will create the file koreader/settings/readwisereader.lua. Add the access token to this file in the following format:
@@ -51,6 +51,12 @@ If reporting a bug, especially one that causes KOReader to crash, please share l
 
 ## Development
 Notes for devs and power-users. Don't proceed unless you know the meaning of each step.
+
+### Code organization
+
+- `readwisereader.koplugin/main.lua` connects KOReader's UI, annotations, settings, local files, and sync workflow. It resolves document metadata and presents errors returned by the API client.
+- `readwisereader.koplugin/readwisereader/api.lua` owns Readwise HTTP requests, authentication, JSON handling, timeouts, and rate-limit sessions. It reads the current token through a callback and reports rate-limit waits to the caller without importing UI widgets.
+- `readwisereader.koplugin/readwisereader/highlights.lua` owns export routing, highlight payloads, saved export history, and note updates. It receives an API client and a callback for saving history, and does not access KOReader's UI or local files.
 
 ### Regression checks
 

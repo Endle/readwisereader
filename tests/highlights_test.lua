@@ -59,7 +59,7 @@ local modules = {
     },
     gettext = function(s) return s end,
     json = json,
-    rapidjson = { decode = json.decode, null = function() end },
+    rapidjson = { encode = json.encode, decode = json.decode, null = function() end },
     socketutil = {
         set_timeout = function() timeouts = timeouts + 1 end,
         reset_timeout = function() timeouts = timeouts - 1 end,
@@ -110,7 +110,11 @@ for _, name in ipairs(unused) do modules[name] = {} end
 for name, module in pairs(modules) do
     package.preload[name] = function() return module end
 end
+-- KOReader temporarily prepends the plugin directory while loading main.lua.
+local package_path = package.path
+package.path = "readwisereader.koplugin/?.lua;" .. package.path
 local Reader = dofile("readwisereader.koplugin/main.lua")
+package.path = package_path
 
 local function newReader()
     local reader = Reader:new{
@@ -245,17 +249,17 @@ test("non-Reader books and clippings without files keep legacy export", function
         local notes = book({"Passage"})
         notes.file = file or nil
         notes.author = "An Author"
-        reader.makeJsonRequest = function(_, url, method, body)
-            eq(url, "https://readwise.io/api/v2/highlights")
-            eq(method, "POST")
-            eq(body.highlights[1].text, "Passage")
-            eq(body.highlights[1].author, "An Author")
-            eq(body.highlights[1].note, "My note")
-            return {}
-        end
+        replies = {{ code = 200, body = {} }}
         assert(reader:createHighlights(notes))
+        local request = http_calls[#http_calls]
+        eq(request.url, "https://readwise.io/api/v2/highlights")
+        eq(request.method, "POST")
+        eq(request.body.highlights[1].text, "Passage")
+        eq(request.body.highlights[1].author, "An Author")
+        eq(request.body.highlights[1].note, "My note")
+        eq(request.headers.Authorization, "Token test-token")
     end
-    eq(#http_calls, 0)
+    eq(#http_calls, 2)
 end)
 
 test("429 retries rebuild the consumed request body", function()
@@ -380,6 +384,78 @@ test("sync still cleans up when export succeeds or is disabled", function()
         reader:synchronize()
         assert(cleanup and archive)
     end
+end)
+
+test("API requests read the current token after settings change", function()
+    local reader = newReader()
+    replies = {
+        { code = 200, body = { results = {} } },
+        { code = 200, body = { results = {} } },
+        { code = 200, body = {} },
+    }
+    assert(reader:callAPI("GET", "/list/"))
+    reader.access_token = "replacement-token"
+    assert(reader:callAPI("GET", "/list/"))
+    assert(reader.api:createReadwiseHighlights({}))
+    eq(http_calls[1].headers.Authorization, "Token test-token")
+    eq(http_calls[2].headers.Authorization, "Token replacement-token")
+    eq(http_calls[3].headers.Authorization, "Token replacement-token")
+end)
+
+test("transport retries safe reads and strips nested JSON nulls", function()
+    local reader = newReader()
+    replies = {
+        { network_error = "wantread" },
+        { code = 200, body = { results = {{ id = "doc-1", author = json.util.null }} } },
+        { code = 204 },
+    }
+    local result = reader:callAPI("GET", "/list/")
+    eq(result.results[1].id, "doc-1")
+    eq(result.results[1].author, nil)
+    eq(#http_calls, 2)
+    eq(sleeps[1], 2)
+    eq(reader:callAPI("PATCH", "/update/doc-1/", { location = "archive" }), true)
+end)
+
+test("only the plugin presents interactive API errors", function()
+    local reader = newReader()
+    replies = {
+        { code = 401 },
+        { code = 401 },
+        { code = 401 },
+        { network_error = "offline" },
+    }
+    local result, err, code = reader.api:requestReader("GET", "/list/")
+    eq(result, nil)
+    eq(err, "http_error")
+    eq(code, 401)
+    eq(#messages, 0)
+    reader:callAPI("GET", "/list/", nil, true)
+    eq(#messages, 0)
+    reader:callAPI("GET", "/list/")
+    contains(messages[1], "401")
+    reader:callAPI("GET", "/list/")
+    contains(messages[2], "Network error")
+end)
+
+test("rate-limit sessions reset independently for each client", function()
+    local reader, another = newReader(), newReader()
+    local progress = {}
+    reader.showProgress = function(_, message) progress[#progress + 1] = message end
+    reader.hideProgress = function() progress[#progress + 1] = "hidden" end
+    replies = {
+        { code = 429, headers = { ["retry-after"] = "2" } },
+        { code = 200, body = {} },
+    }
+    assert(reader.api:requestReader("GET", "/list/"))
+    contains(progress[1], "2 seconds")
+    eq(progress[2], "hidden")
+    eq(reader.api.needs_rate_limiting, true)
+    eq(another.api.needs_rate_limiting, false)
+    reader.api:resetRateLimit()
+    eq(reader.api.api_call_count, 0)
+    eq(reader.api.sync_start_time, nil)
+    eq(reader.api.needs_rate_limiting, false)
 end)
 
 print(string.format("%d tests passed", passed))
