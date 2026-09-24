@@ -133,6 +133,10 @@ function ReadwiseReader:init()
     -- Initialize source URL metadata storage (for highlight export)
     self.document_source_urls = settings.document_source_urls or {}
 
+    -- Reader highlight IDs and last exported notes, keyed by document and passage.
+    -- Keep these after cleanup so re-downloaded articles retain export history.
+    self.reader_highlights = settings.reader_highlights or {}
+
     -- Initialize image download settings
     self.download_images = settings.download_images == nil and true or settings.download_images
     self.max_image_size_mb = settings.max_image_size_mb or 10
@@ -543,7 +547,7 @@ function ReadwiseReader:parseAllBooks()
         logger.dbg("ReadwiseReader:parseAllBooks: flushing open document before parsing")
         local ok, err = pcall(function() self.ui:saveSettings() end)
         if not ok then
-            logger.warn("ReadwiseReader:parseAllBooks: could not flush open document:", err)
+            error("Could not save the open document's annotations: " .. tostring(err))
         end
     end
 
@@ -574,7 +578,61 @@ function ReadwiseReader:parseAllBooks()
     return clippings
 end
 
+function ReadwiseReader:createReaderHighlights(document_id, booknotes)
+    local saved = self.reader_highlights[document_id] or {}
+    self.reader_highlights[document_id] = saved
+
+    for _, chapter in ipairs(booknotes) do
+        for _, clipping in ipairs(chapter) do
+            local passage = clipping.text
+            if type(passage) ~= "string" or not passage:find("%S") then
+                return false, "Reader requires a non-empty text highlight."
+            end
+            local notes = clipping.note or ""
+            local previous = saved[passage]
+            local result, err, code
+            if previous and previous.notes ~= notes then
+                -- Editing a note must not create a second highlight. An empty
+                -- string explicitly removes a previously exported note.
+                result, err, code = self:callAPI("PATCH", "/update/" .. previous.id .. "/",
+                    { notes = notes }, true)
+                if not result then
+                    return false, string.format("Could not update highlight note (%s).", tostring(code or err))
+                end
+            elseif not previous then
+                result, err, code = self:callAPI("POST", "/save/", {
+                    parent_id = document_id,
+                    content = passage,
+                    notes = notes,
+                    saved_using = "koreader",
+                }, true)
+                if not result then
+                    if code == 400 then
+                        return false, "Reader rejected the highlight; its text may not match the original article."
+                    end
+                    return false, string.format("Could not create Reader highlight (%s).", tostring(code or err))
+                end
+                if type(result) ~= "table" or type(result.id) ~= "string" or result.id == "" then
+                    return false, "Reader did not return a highlight ID."
+                end
+            end
+            if result then
+                saved[passage] = { id = previous and previous.id or result.id, notes = notes }
+                -- Save each success immediately: a later failure must not cause
+                -- already exported passages to be sent again on the next sync.
+                self:saveSettings()
+            end
+        end
+    end
+    return true
+end
+
 function ReadwiseReader:createHighlights(booknotes)
+    local document_id = booknotes.file and self:getDocumentIdFromPath(booknotes.file)
+    if document_id and document_id ~= "" then
+        return self:createReaderHighlights(document_id, booknotes)
+    end
+
     local highlights = {}
     local json_headers = {
         ["Authorization"] = "Token " .. self.access_token,
@@ -624,9 +682,8 @@ function ReadwiseReader:createHighlights(booknotes)
     return true
 end
 
--- Runs the highlight export pipeline. Returns the count exported and, on a parse
--- failure, the error -- the caller words that message, since "continuing with article
--- sync" is only true on the sync path.
+-- Returns the number of successfully processed books and any export error.
+-- Sync must stop before cleanup when even one book has unsent highlights.
 function ReadwiseReader:exportHighlights()
     self:showProgress("Exporting highlights to Readwise...")
 
@@ -642,14 +699,16 @@ function ReadwiseReader:exportHighlights()
         -- must not be `_`: that is the gettext upvalue, and overwriting it
         -- breaks every later _("...") call
         local errors
-        exported, errors = self:exportToReadwise(clippings)
+        local ok, count, export_errors = pcall(self.exportToReadwise, self, clippings)
+        if not ok then
+            self:hideProgress()
+            return 0, tostring(count)
+        end
+        exported, errors = count, export_errors
         if errors and #errors > 0 then
             logger.warn("ReadwiseReader:exportHighlights: highlight export errors:", table.concat(errors, "; "))
-            UIManager:show(InfoMessage:new{
-                text = string.format("Highlight export failed for %d book(s):\n%s",
-                    #errors, errors[1]),
-                timeout = 5
-            })
+            self:hideProgress()
+            return exported, string.format("Highlight export failed for %d book(s):\n%s", #errors, errors[1])
         end
     end
 
@@ -732,7 +791,7 @@ function ReadwiseReader:addToMainMenu(menu_items)
                                     })
                                 else
                                     UIManager:show(InfoMessage:new{
-                                        text = string.format("Exported %d highlight(s).", exported),
+                                        text = string.format("Processed highlights for %d book(s).", exported),
                                         timeout = 3
                                     })
                                 end
@@ -1518,7 +1577,9 @@ function ReadwiseReader:callAPI(method, endpoint, body, quiet)
 
         if resp_headers == nil then
             -- network layer: only the Kindle TLS "wantread" error is worth retrying
-            if not tostring(status or code or ""):match("wantread") then break end
+            -- A lost create response may already have created the highlight.
+            -- Do not blindly retry a POST whose outcome is unknown.
+            if method == "POST" or not tostring(status or code or ""):match("wantread") then break end
             logger.dbg("ReadwiseReader:callAPI: wantread error, attempt", attempt, "of", max_attempts)
             socket.sleep(2)
         elseif code == 429 then
@@ -1536,7 +1597,7 @@ function ReadwiseReader:callAPI(method, endpoint, body, quiet)
         return nil, "network_error"
     end
     
-    if code == 200 or code == 204 then
+    if code == 200 or code == 201 or code == 204 then
         local content = table.concat(sink)
         if content ~= "" then
             local ok, result = pcall(JSON.decode, content)
@@ -2377,14 +2438,14 @@ function ReadwiseReader:synchronize()
     -- Export highlights if enabled
     local highlights_exported = 0
     if self.export_highlights_at_sync then
-        local parse_err
-        highlights_exported, parse_err = self:exportHighlights()
-        if parse_err then
+        local export_err
+        highlights_exported, export_err = self:exportHighlights()
+        if export_err then
             UIManager:show(InfoMessage:new{
-                text = string.format("Note: Highlight export failed, but continuing with article sync.\n%s",
-                    tostring(parse_err)),
-                timeout = 5
+                text = string.format("Sync stopped to preserve local articles and annotations.\n%s",
+                    tostring(export_err)),
             })
+            return
         end
     end
     
@@ -2472,7 +2533,7 @@ function ReadwiseReader:synchronize()
     local msg = "Sync complete:"
     
     if highlights_exported > 0 then
-        msg = msg .. "\n" .. string.format("Exported highlights: %d books", highlights_exported)
+        msg = msg .. "\n" .. string.format("Processed highlights: %d books", highlights_exported)
     end
     
     if downloaded > 0 then
@@ -2538,6 +2599,7 @@ function ReadwiseReader:saveSettings()
         document_locations = self.document_locations,
         document_authors = self.document_authors,
         document_source_urls = self.document_source_urls,
+        reader_highlights = self.reader_highlights,
         download_images = self.download_images,
         max_image_size_mb = self.max_image_size_mb,
         max_articles_to_download = self.max_articles_to_download,
