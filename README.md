@@ -45,8 +45,7 @@ return {
 - By default, the extension will be added to the file menu with the prefix NEW:. The plugin will work in this format, but to remove the NEW: prefix and to move it to a different menu, add a line for  `"readwisereader",` in the appropriate place in koreader/frontend/ui/elements/filemanager_menu_order.lua
 
 ## Bug reporting
-If reporting a bug, especially one that causes KOReader to crash, please share logging from your device in koreader/crash.log. Errors and crashes are clearly marked. To ensure that you just capture the relevant logs, delete the file, let KOReader regenerate it for you, then save the file after the issue has occurred.
-
+If reporting a bug, especially KOReader crashes, please share logging from your device in `koreader/crash.log`. 
 ## Development
 Notes for devs and power-users. Don't proceed unless you know the meaning of each step.
 
@@ -58,3 +57,8 @@ KOReader has [Linux release](https://github.com/koreader/koreader/wiki/Installat
 3. Check plugin directory `$HOME/.var/app/rocks.koreader.KOReader/config/koreader/plugins` - Thanks to [MountainToppish](https://www.reddit.com/r/koreader/comments/1mt7g9x/how_to_add_plugins_to_koreader_installed_from/)
 4. Install the plugin by `cd  $HOME/.var/app/rocks.koreader.KOReader/config/koreader/plugins && ln -s $HOME/<source_path>/readwisereader.koplugin`
 5. Restart KOReader
+
+## Contribution & Release Rules
+- Before creating a PR, please review it by *human* first. Otherwise, please mark it as draft.
+- All PRs will be merged after a maintainer has tested it with KOReader.
+- All releases will be tested with a real E-ink device.
