@@ -141,7 +141,9 @@ function ReadwiseAPI:requestReader(method, endpoint, body)
 
         if resp_headers == nil then
             -- network layer: only the Kindle TLS "wantread" error is worth retrying
-            if not tostring(status or code or ""):match("wantread") then break end
+            -- A lost create response may already have created the highlight.
+            -- Do not blindly retry a POST whose outcome is unknown.
+            if method == "POST" or not tostring(status or code or ""):match("wantread") then break end
             logger.dbg("ReadwiseAPI:requestReader: wantread error, attempt", attempt, "of", max_attempts)
             socket.sleep(2)
         elseif code == 429 then
@@ -156,7 +158,7 @@ function ReadwiseAPI:requestReader(method, endpoint, body)
         return nil, "network_error"
     end
 
-    if code == 200 or code == 204 then
+    if code == 200 or code == 201 or code == 204 then
         local content = table.concat(sink)
         if content ~= "" then
             local ok, result = pcall(JSON.decode, content)
