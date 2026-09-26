@@ -16,7 +16,7 @@ jobs:
       - name: Luacheck
         uses: lunarmodules/luacheck@v1
         with:
-          args: readwisereader.koplugin/
+          args: readwisereader.koplugin/ tests/
 
       # luacheck's parser accepts newer Lua syntax that LuaJIT would reject, so
       # compile against the runtime KOReader actually ships. A syntax error here
@@ -36,3 +36,6 @@ jobs:
             fi
           done
           exit $status
+
+      - name: Highlight export regression tests
+        run: luajit tests/highlights_test.lua
