@@ -21,6 +21,8 @@
 
 -- logger is required first: it is used by the ReadCollection fallback below
 local logger = require("logger")
+-- KOReader only puts the plugin directory on package.path while it loads this
+-- file, so plugin modules must be required here, never lazily inside a function.
 local ReadwiseAPI = require("readwisereader/api")
 local HighlightExporter = require("readwisereader/highlights")
 
