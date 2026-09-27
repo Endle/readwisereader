@@ -50,10 +50,6 @@ If reporting a bug, especially one that causes KOReader to crash, please share l
 ## Development
 Notes for devs and power-users. Don't proceed unless you know the meaning of each step.
 
-### Regression checks
-
-Run `luajit tests/highlights_test.lua` from the repository root. These tests stub KOReader and HTTP to cover API transport, rate-limit retries, JSON null handling, error presentation, and highlight export payloads. CI also runs these checks.
-
 ### Test KOReader on Linux PC
 KOReader has [Linux release](https://github.com/koreader/koreader/wiki/Installation-on-desktop-linux), so it's a breeze to test this plugin on Linux.
 
