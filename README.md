@@ -50,12 +50,6 @@ If reporting a bug, especially one that causes KOReader to crash, please share l
 ## Development
 Notes for devs and power-users. Don't proceed unless you know the meaning of each step.
 
-### Code organization
-
-- `readwisereader.koplugin/main.lua` connects KOReader's UI, annotations, settings, local files, and sync workflow. It resolves document metadata and presents errors returned by the API client.
-- `readwisereader.koplugin/readwisereader/api.lua` owns Readwise HTTP requests, authentication, JSON handling, timeouts, and rate-limit sessions. It reads the current token through a callback and reports rate-limit waits to the caller without importing UI widgets.
-- `readwisereader.koplugin/readwisereader/highlights.lua` owns highlight export payloads. It receives an API client and does not access KOReader's UI or local files.
-
 ### Regression checks
 
 Run `luajit tests/highlights_test.lua` from the repository root. These tests stub KOReader and HTTP to cover API transport, rate-limit retries, JSON null handling, error presentation, and highlight export payloads. CI also runs these checks.
