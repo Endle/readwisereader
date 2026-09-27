@@ -60,5 +60,5 @@ KOReader has [Linux release](https://github.com/koreader/koreader/wiki/Installat
 5. Restart KOReader
 
 ## Release Rules
-- PRs can only be merged after a maintainer has tested it.
+- PRs can only be merged after a maintainer has tested team.
 - Testing with a real E-ink device is required for creating new releases.
