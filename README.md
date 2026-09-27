@@ -59,7 +59,6 @@ KOReader has [Linux release](https://github.com/koreader/koreader/wiki/Installat
 4. Install the plugin by `cd  $HOME/.var/app/rocks.koreader.KOReader/config/koreader/plugins && ln -s $HOME/<source_path>/readwisereader.koplugin`
 5. Restart KOReader
 
-## Contribution & Release Rules
-- Before creating a PR, please review it by *human* first. Otherwise, please mark it as draft.
-- All PRs will be merged after a maintainer has tested it with KOReader.
-- All releases will be tested with a real E-ink device.
+## Release Rules
+- PRs can only be merged after a maintainer has tested it.
+- Testing with a real E-ink device is required for creating new releases.
