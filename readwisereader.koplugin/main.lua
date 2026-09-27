@@ -21,6 +21,10 @@
 
 -- logger is required first: it is used by the ReadCollection fallback below
 local logger = require("logger")
+-- KOReader only puts the plugin directory on package.path while it loads this
+-- file, so plugin modules must be required here, never lazily inside a function.
+local ReadwiseAPI = require("readwisereader/api")
+local HighlightExporter = require("readwisereader/highlights")
 
 local BD = require("ui/bidi")
 local DataStorage = require("datastorage")
@@ -31,7 +35,6 @@ local FFIUtil = require("ffi/util")
 local FileManager = require("apps/filemanager/filemanager")
 local InfoMessage = require("ui/widget/infomessage")
 local InputDialog = require("ui/widget/inputdialog")
-local JSON = require("json")
 local LuaSettings = require("luasettings")
 local ConfirmBox = require("ui/widget/confirmbox")
 local MultiConfirmBox = require("ui/widget/multiconfirmbox")
@@ -52,7 +55,6 @@ local http = require("socket.http")
 local lfs = require("libs/libkoreader-lfs")
 local ltn12 = require("ltn12")
 local mime = require("mime")
-local rapidjson = require("rapidjson")
 local socket = require("socket")
 local socketutil = require("socketutil")
 local util = require("util")
@@ -60,32 +62,8 @@ local _ = require("gettext")
 local T = FFIUtil.template
 
 -- constants
-local API_ENDPOINT = "https://readwise.io/api/v3"
-local HIGHLIGHTS_API_ENDPOINT = "https://readwise.io/api/v2"
 local article_id_prefix = "[rw-id_"
 local article_id_postfix = "] "
-
--- Both JSON decoders represent null as a *truthy* sentinel (LuaJSON a function,
--- rapidjson a lightuserdata), so `x or "default"` guards silently pass it through.
-local JSON_NULL = JSON.util and JSON.util.null
-local RAPIDJSON_NULL = rapidjson.null
-
-local function stripJsonNulls(value)
-    if value == JSON_NULL or value == RAPIDJSON_NULL then
-        return nil
-    end
-    if type(value) ~= "table" then
-        return value
-    end
-    for k, v in pairs(value) do
-        if v == JSON_NULL or v == RAPIDJSON_NULL then
-            value[k] = nil
-        elseif type(v) == "table" then
-            stripJsonNulls(v)
-        end
-    end
-    return value
-end
 
 local ReadwiseReader = WidgetContainer:extend{
     name = "readwisereader",
@@ -143,10 +121,17 @@ function ReadwiseReader:init()
     -- Initialize koreader tag filter (only sync articles tagged "koreader")
     self.sync_only_koreader_tag = settings.sync_only_koreader_tag or false
 
-    -- Simple rate limiting state
-    self.api_call_count = 0
-    self.sync_start_time = nil
-    self.needs_rate_limiting = false
+    self.api = ReadwiseAPI:new{
+        get_token = function() return self.access_token end,
+        on_rate_limit = function(seconds)
+            if seconds then
+                self:showProgress(string.format("Rate limited, waiting %d seconds…", seconds))
+            else
+                self:hideProgress()
+            end
+        end,
+    }
+    self.highlight_exporter = HighlightExporter:new{ api = self.api }
 
     -- Initialize highlights parser with a mock UI to satisfy new clip.lua requirements
     local mock_ui = {
@@ -157,58 +142,6 @@ function ReadwiseReader:init()
     self.parser = MyClipping:new{ ui = mock_ui, settings = {} }
     
     self.ui.menu:registerToMainMenu(self)
-end
-
--- ===============================================================================
--- SIMPLE ADAPTIVE RATE LIMITING
--- ===============================================================================
-
-function ReadwiseReader:checkRateLimit()
-    -- Only start counting after we make some API calls
-    if self.api_call_count == 0 then
-        self.sync_start_time = os.time()
-        self.api_call_count = 1
-        return
-    end
-    
-    self.api_call_count = self.api_call_count + 1
-    
-    -- After 5 API calls, check if we need rate limiting
-    if self.api_call_count == 5 and not self.needs_rate_limiting then
-        local elapsed = os.time() - self.sync_start_time
-        if elapsed < 20 then -- 5 calls in under 20 seconds suggests large library
-            self.needs_rate_limiting = true
-            logger.dbg("ReadwiseReader: enabling rate limiting after", self.api_call_count, "calls in", elapsed, "seconds")
-        end
-    end
-    
-    -- Apply rate limiting if needed
-    if self.needs_rate_limiting and self.api_call_count > 3 then
-        -- Reader API limit is 20/minute, so wait 3 seconds between calls to be safe
-        logger.dbg("ReadwiseReader: applying 3 second rate limit delay")
-        socket.sleep(3)
-    end
-end
-
-function ReadwiseReader:handleRetryAfter(code, headers)
-    -- Handle 429 rate limit responses
-    if code == 429 then
-        local retry_after = 60 -- Default to 60 seconds
-        if headers and headers["retry-after"] then
-            retry_after = tonumber(headers["retry-after"]) or 60
-        end
-        
-        -- Enable rate limiting for future calls
-        self.needs_rate_limiting = true
-        
-        logger.warn("ReadwiseReader: hit rate limit, waiting", retry_after, "seconds")
-        self:showProgress(string.format("Rate limited, waiting %d seconds…", retry_after))
-        socket.sleep(retry_after)
-        self:hideProgress()
-        
-        return true -- Indicate we should retry
-    end
-    return false
 end
 
 -- ===============================================================================
@@ -249,15 +182,6 @@ function ReadwiseReader:removeAuthorMetadata(document_id)
     end
 end
 
-function ReadwiseReader:getDocumentAuthorFromFile(filepath)
-    -- Extract document ID from filepath and get stored author
-    local doc_id = self:getDocumentIdFromPath(filepath)
-    if doc_id then
-        return self:getStoredAuthor(doc_id)
-    end
-    return nil
-end
-
 -- ===============================================================================
 -- SOURCE URL METADATA STORAGE AND RETRIEVAL FUNCTIONS
 -- ===============================================================================
@@ -290,14 +214,6 @@ function ReadwiseReader:removeSourceUrlMetadata(document_id)
         logger.dbg("ReadwiseReader:removeSourceUrlMetadata: removed source_url metadata for document", document_id)
         self:saveSettings()
     end
-end
-
-function ReadwiseReader:getDocumentSourceUrlFromFile(filepath)
-    local doc_id = self:getDocumentIdFromPath(filepath)
-    if doc_id then
-        return self:getStoredSourceUrl(doc_id)
-    end
-    return nil
 end
 
 -- ===============================================================================
@@ -465,57 +381,6 @@ end
 -- HIGHLIGHTS EXPORT FUNCTIONALITY
 -- ===============================================================================
 
-function ReadwiseReader:makeJsonRequest(endpoint, method, body, headers)
-    local sink = {}
-    local extra_headers = headers or {}
-    local body_json, response, err
-
-    body_json, err = rapidjson.encode(body)
-    if not body_json then
-        return nil, "Cannot encode body: " .. (err or "unknown error")
-    end
-    
-    local source = ltn12.source.string(body_json)
-    socketutil:set_timeout(socketutil.LARGE_BLOCK_TIMEOUT, socketutil.LARGE_TOTAL_TIMEOUT)
-
-    local request = {
-        url = endpoint,
-        method = method,
-        sink = ltn12.sink.table(sink),
-        source = source,
-        headers = {
-            ["Content-Length"] = #body_json,
-            ["Content-Type"] = "application/json",
-        },
-    }
-
-    -- fill in extra headers
-    for k, v in pairs(extra_headers) do
-        request.headers[k] = v
-    end
-
-    local code, __, status = socket.skip(1, http.request(request))
-    socketutil:reset_timeout()
-
-    if code ~= 200 then
-        return nil, "Request failed: " .. (status or code or "network unreachable")
-    end
-
-    -- ltn12 delivers the body in BLOCKSIZE (2048 byte) chunks, so sink[1] is only the
-    -- first one; anything larger has to be joined before it will parse.
-    local content = table.concat(sink)
-    if content == "" then
-        return nil, "No response from server"
-    end
-
-    response, err = rapidjson.decode(content)
-    if not response then
-        return nil, "Unable to decode server response: " .. (err or "unknown error")
-    end
-
-    return stripJsonNulls(response)
-end
-
 function ReadwiseReader:getDocumentClippings()
     return self.parser:parseCurrentDoc(self.view) or {}
 end
@@ -528,9 +393,7 @@ function ReadwiseReader:runSyncAction(action)
         if not self:validateSettings() then
             return
         end
-        self.api_call_count = 0
-        self.sync_start_time = nil
-        self.needs_rate_limiting = false
+        self.api:resetRateLimit()
         action()
     end)
 end
@@ -575,53 +438,11 @@ function ReadwiseReader:parseAllBooks()
 end
 
 function ReadwiseReader:createHighlights(booknotes)
-    local highlights = {}
-    local json_headers = {
-        ["Authorization"] = "Token " .. self.access_token,
-    }
-
-    -- Try to get the correct author and source_url from stored metadata
-    local correct_author = nil
-    local source_url = nil
-    if booknotes.file then
-        correct_author = self:getDocumentAuthorFromFile(booknotes.file)
-        source_url = self:getDocumentSourceUrlFromFile(booknotes.file)
-    end
-    
-    -- Fallback to booknotes.author if no stored metadata, but clean it up
-    if not correct_author and booknotes.author and booknotes.author ~= "" then
-        -- Check if the author looks like a filename (contains file extensions)
-        if not booknotes.author:match("%.%w+$") and not booknotes.author:match("[/\\]") then
-            correct_author = booknotes.author:gsub("\n", ", ")
-        end
-    end
-
-    for _, chapter in ipairs(booknotes) do
-        for _, clipping in ipairs(chapter) do
-            local highlight = {
-                text = clipping.text,
-                title = booknotes.title,
-                author = correct_author,
-                source_url = source_url,
-                source_type = "koreader",
-                category = "articles",  -- Changed from "books" to "articles"
-                note = clipping.note,
-                location = clipping.page,
-                location_type = "order",
-                highlighted_at = os.date("!%Y-%m-%dT%TZ", clipping.time),
-            }
-            table.insert(highlights, highlight)
-        end
-    end
-
-    local result, err = self:makeJsonRequest(HIGHLIGHTS_API_ENDPOINT .. "/highlights", "POST",
-         { highlights = highlights }, json_headers)
-
-    if not result then
-        logger.warn("ReadwiseReader: error creating highlights", err)
-        return false, err
-    end
-    return true
+    local document_id = booknotes.file and self:getDocumentIdFromPath(booknotes.file)
+    return self.highlight_exporter:exportBook(booknotes, {
+        author = document_id and self:getStoredAuthor(document_id),
+        source_url = document_id and self:getStoredSourceUrl(document_id),
+    })
 end
 
 -- Runs the highlight export pipeline. Returns the count exported and, on a parse
@@ -1476,91 +1297,19 @@ function ReadwiseReader:showMaxArticlesDialog()
     UIManager:show(spin)
 end
 
+-- Present interactive request errors here; the API client only returns errors.
 function ReadwiseReader:callAPI(method, endpoint, body, quiet)
-    quiet = quiet or false
-    local headers = {
-        ["Authorization"] = "Token " .. self.access_token,
-        ["Content-Type"] = "application/json",
-    }
-    
-    local sink = {}
-    local request = {
-        url = API_ENDPOINT .. endpoint,
-        method = method,
-        headers = headers,
-    }
-
-    -- kept in scope so every attempt can rebuild the single-use source
-    local json_body
-    if body then
-        json_body = JSON.encode(body)
-        request.headers["Content-Length"] = tostring(#json_body)
-    end
-
-    logger.dbg("ReadwiseReader:callAPI:", method, endpoint)
-
-    local max_attempts = 3
-    local code, resp_headers, status
-
-    for attempt = 1, max_attempts do
-        sink = {}
-        request.sink = ltn12.sink.table(sink)
-        if body then
-            request.source = ltn12.source.string(json_body)
-        end
-
-        self:checkRateLimit()
-        socketutil:set_timeout(10, 60)
-        code, resp_headers, status = socket.skip(1, http.request(request))
-        socketutil:reset_timeout()
-
-        if attempt == max_attempts then break end
-
-        if resp_headers == nil then
-            -- network layer: only the Kindle TLS "wantread" error is worth retrying
-            if not tostring(status or code or ""):match("wantread") then break end
-            logger.dbg("ReadwiseReader:callAPI: wantread error, attempt", attempt, "of", max_attempts)
-            socket.sleep(2)
-        elseif code == 429 then
-            self:handleRetryAfter(code, resp_headers)  -- sleeps for Retry-After
-        else
-            break
-        end
-    end
-
-    if resp_headers == nil then
-        logger.err("ReadwiseReader:callAPI: network error", status or code)
-        if not quiet then
+    local result, err, code = self.api:requestReader(method, endpoint, body)
+    if not result and not quiet then
+        if err == "network_error" then
             UIManager:show(InfoMessage:new{ text = "Network error connecting to Readwise Reader." })
-        end
-        return nil, "network_error"
-    end
-    
-    if code == 200 or code == 204 then
-        local content = table.concat(sink)
-        if content ~= "" then
-            local ok, result = pcall(JSON.decode, content)
-            if ok then
-                result = stripJsonNulls(result)
-            end
-            if ok and result ~= nil then
-                return result
-            else
-                logger.err("ReadwiseReader:callAPI: invalid JSON response")
-                return nil, "json_error"
-            end
-        else
-            return true
-        end
-    else
-        logger.err("ReadwiseReader:callAPI: HTTP error", code, status)
-        if not quiet then
-            UIManager:show(InfoMessage:new{ 
-                text = string.format("Error connecting to Readwise Reader: %s", code) 
+        elseif err == "http_error" then
+            UIManager:show(InfoMessage:new{
+                text = string.format("Error connecting to Readwise Reader: %s", code),
             })
         end
-        return nil, "http_error", code
     end
+    return result, err, code
 end
 
 function ReadwiseReader:getDocumentList()
@@ -2368,9 +2117,7 @@ function ReadwiseReader:synchronize()
     UIManager:close(info)
     
     -- Reset rate limiting for new sync session
-    self.api_call_count = 0
-    self.sync_start_time = nil
-    self.needs_rate_limiting = false
+    self.api:resetRateLimit()
     
     local sync_start_time = os.date("!%Y-%m-%dT%H:%M:%SZ")
     
