@@ -140,9 +140,8 @@ function ReadwiseAPI:requestReader(method, endpoint, body)
         if attempt == max_attempts then break end
 
         if resp_headers == nil then
-            -- network layer: only the Kindle TLS "wantread" error is worth retrying
-            -- A lost create response may already have created the highlight.
-            -- Do not blindly retry a POST whose outcome is unknown.
+            -- network layer: only the Kindle TLS "wantread" error is worth retrying,
+            -- and never for a POST, which may already have created the object
             if method == "POST" or not tostring(status or code or ""):match("wantread") then break end
             logger.dbg("ReadwiseAPI:requestReader: wantread error, attempt", attempt, "of", max_attempts)
             socket.sleep(2)
