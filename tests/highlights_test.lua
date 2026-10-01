@@ -287,4 +287,20 @@ test("rate-limit sessions reset independently for each client", function()
     eq(reader.api.needs_rate_limiting, false)
 end)
 
+test("Reader requests accept 201 Created", function()
+    local reader = newReader()
+    replies = {{ code = 201, body = { id = "created-1" } }}
+    local result = reader:callAPI("POST", "/save/", { url = "https://example.com" })
+    eq(result.id, "created-1")
+end)
+
+test("ambiguous POST failures are not automatically retried", function()
+    local reader = newReader()
+    replies = {{ network_error = "wantread" }}
+    local result, err = reader:callAPI("POST", "/save/", { url = "https://example.com" }, true)
+    eq(result, nil)
+    eq(err, "network_error")
+    eq(#http_calls, 1)
+end)
+
 print(string.format("%d tests passed", passed))

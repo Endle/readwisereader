@@ -140,8 +140,10 @@ function ReadwiseAPI:requestReader(method, endpoint, body)
         if attempt == max_attempts then break end
 
         if resp_headers == nil then
-            -- network layer: only the Kindle TLS "wantread" error is worth retrying
-            if not tostring(status or code or ""):match("wantread") then break end
+            -- network layer: only the Kindle TLS "wantread" error is worth retrying,
+            -- and never for a POST, which may already have created the object
+            -- (the wantread retry was added in #15 after intermittent failures on a Kindle Paperwhite)
+            if method == "POST" or not tostring(status or code or ""):match("wantread") then break end
             logger.dbg("ReadwiseAPI:requestReader: wantread error, attempt", attempt, "of", max_attempts)
             socket.sleep(2)
         elseif code == 429 then
@@ -156,7 +158,7 @@ function ReadwiseAPI:requestReader(method, endpoint, body)
         return nil, "network_error"
     end
 
-    if code == 200 or code == 204 then
+    if code == 200 or code == 201 or code == 204 then
         local content = table.concat(sink)
         if content ~= "" then
             local ok, result = pcall(JSON.decode, content)
