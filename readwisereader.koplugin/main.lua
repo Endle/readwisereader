@@ -406,7 +406,7 @@ function ReadwiseReader:parseAllBooks()
         logger.dbg("ReadwiseReader:parseAllBooks: flushing open document before parsing")
         local ok, err = pcall(function() self.ui:saveSettings() end)
         if not ok then
-            logger.warn("ReadwiseReader:parseAllBooks: could not flush open document:", err)
+            error("Could not save the open document's annotations: " .. tostring(err))
         end
     end
 
@@ -445,9 +445,9 @@ function ReadwiseReader:createHighlights(booknotes)
     })
 end
 
--- Runs the highlight export pipeline. Returns the count exported and, on a parse
--- failure, the error -- the caller words that message, since "continuing with article
--- sync" is only true on the sync path.
+-- Runs the highlight export pipeline. Returns the count exported and, if parsing or
+-- any book failed, the error -- the caller words that message, since what happens
+-- next differs between the sync path and the Advanced sync action.
 function ReadwiseReader:exportHighlights()
     self:showProgress("Exporting highlights to Readwise...")
 
@@ -466,11 +466,8 @@ function ReadwiseReader:exportHighlights()
         exported, errors = self:exportToReadwise(clippings)
         if errors and #errors > 0 then
             logger.warn("ReadwiseReader:exportHighlights: highlight export errors:", table.concat(errors, "; "))
-            UIManager:show(InfoMessage:new{
-                text = string.format("Highlight export failed for %d book(s):\n%s",
-                    #errors, errors[1]),
-                timeout = 5
-            })
+            self:hideProgress()
+            return exported, string.format("Highlight export failed for %d book(s):\n%s", #errors, errors[1])
         end
     end
 
@@ -2123,22 +2120,26 @@ function ReadwiseReader:synchronize()
     
     -- Export highlights if enabled
     local highlights_exported = 0
+    -- After a failed export some annotations exist only on this device, so skip
+    -- every step that deletes local files and keep the cursor for the next sync.
+    local keep_local = false
     if self.export_highlights_at_sync then
         local parse_err
         highlights_exported, parse_err = self:exportHighlights()
         if parse_err then
+            keep_local = true
             UIManager:show(InfoMessage:new{
-                text = string.format("Note: Highlight export failed, but continuing with article sync.\n%s",
+                text = string.format("Note: Highlight export failed, so no local articles will be removed.\n%s",
                     tostring(parse_err)),
                 timeout = 5
             })
         end
     end
     
-    local cleaned_count = self:cleanupArchivedDocuments()
+    local cleaned_count = keep_local and 0 or self:cleanupArchivedDocuments()
     
     local archived_count, deleted_count = 0, 0
-    if self.archive_finished then
+    if self.archive_finished and not keep_local then
         self:showProgress("Processing finished articles…")
         archived_count, deleted_count = self:processFinishedDocuments()
     end
@@ -2155,7 +2156,7 @@ function ReadwiseReader:synchronize()
     self:updateAvailableTags(documents)
 
     -- Remove local articles that no longer match server state
-    local reconciled_count = self:reconcileLocalDocuments(documents)
+    local reconciled_count = keep_local and 0 or self:reconcileLocalDocuments(documents)
     self:hideProgress()
 
     local filtered_documents = {}
@@ -2178,7 +2179,9 @@ function ReadwiseReader:synchronize()
         self:hideProgress()
         UIManager:show(InfoMessage:new{ text = msg })
         
-        self.last_sync_time = sync_start_time
+        if not keep_local then
+            self.last_sync_time = sync_start_time
+        end
         self:saveSettings()
         return
     end
@@ -2213,7 +2216,9 @@ function ReadwiseReader:synchronize()
 
     self:hideProgress()
     
-    self.last_sync_time = sync_start_time
+    if not keep_local then
+        self.last_sync_time = sync_start_time
+    end
     self:saveSettings()
     
     local msg = "Sync complete:"

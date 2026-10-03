@@ -15,6 +15,7 @@ A plugin for KOReader integration with the highlight saving and read later servi
 ## Limitations and Known Issues:
 - Unfortunately two way highlight syncing is not possible as the Readwise Reader API does not provide the location data required by KOReader.
 - Highlights that this plugin creates in Readwise will not link back to the original article in Readwise Reader. Again, this is an API limitation - see the discussion [here](https://github.com/tomtom800/readwisereader/issues/20). 
+- If any highlight export fails, sync still downloads new articles but does not remove or archive any local ones, so annotations that were not exported stay on the device. Retry after resolving the error. The Advanced sync archive/delete actions remain explicit manual actions.
 - I am not planning to add any options to style the documents. However there are lots of tweaks you can apply as a user - see [here](https://koreader.rocks/user_guide/#L1-customizingappearance). 
 
 ## Installation:
