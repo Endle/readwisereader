@@ -28,46 +28,6 @@ local function bookClippings(booknotes)
     return clippings
 end
 
--- Sends clippings through the Readwise highlights API (v2). It matches existing
--- highlights by text, title, author and source URL, so resending updates a note.
-function HighlightExporter:sendToHighlightsAPI(booknotes, metadata, clippings)
-    local highlights = {}
-    local correct_author = metadata.author
-    local source_url = metadata.source_url
-
-    -- Fallback to booknotes.author if no stored metadata, but clean it up
-    if not correct_author and booknotes.author and booknotes.author ~= "" then
-        -- Check if the author looks like a filename (contains file extensions)
-        if not booknotes.author:match("%.%w+$") and not booknotes.author:match("[/\\]") then
-            correct_author = booknotes.author:gsub("\n", ", ")
-        end
-    end
-
-    for _, clipping in ipairs(clippings) do
-        local highlight = {
-            text = clipping.text,
-            title = booknotes.title,
-            author = correct_author,
-            source_url = source_url,
-            source_type = "koreader",
-            category = "articles",
-            note = clipping.note,
-            location = clipping.page,
-            location_type = "order",
-            highlighted_at = os.date("!%Y-%m-%dT%TZ", clipping.time),
-        }
-        table.insert(highlights, highlight)
-    end
-
-    local result, err = self.api:createReadwiseHighlights(highlights)
-
-    if not result then
-        logger.warn("HighlightExporter: error creating highlights", err)
-        return false, err
-    end
-    return true
-end
-
 -- Reader records are { id, notes }. Passages Reader rejected are recorded as
 -- { fallback = true, notes } and only ever go through the highlights API again.
 function HighlightExporter:exportReaderBook(document_id, booknotes, metadata)
@@ -105,6 +65,8 @@ function HighlightExporter:exportReaderBook(document_id, booknotes, metadata)
             end
             record(passage, { id = previous.id, notes = notes })
         elseif previous then
+            -- Rejected by Reader earlier. The highlights API matches the existing
+            -- highlight by text, title, author and source URL, so this updates its note.
             fallback[#fallback + 1] = clipping
             queued[passage] = true
         else
@@ -135,7 +97,9 @@ function HighlightExporter:exportReaderBook(document_id, booknotes, metadata)
     -- Send rejected passages even when a later one failed, so they are not
     -- offered to Reader again on the next sync.
     if #fallback > 0 then
-        local ok, err = self:sendToHighlightsAPI(booknotes, metadata, fallback)
+        -- Without a document_id, exportBook sends them through the highlights API.
+        local ok, err = self:exportBook({ title = booknotes.title, author = booknotes.author, fallback },
+            { author = metadata.author, source_url = metadata.source_url })
         if not ok then
             local fallback_failure = string.format(
                 "Reader rejected %d highlight(s) and the Readwise highlights API failed (%s).",
@@ -160,7 +124,44 @@ function HighlightExporter:exportBook(booknotes, metadata)
     if document_id and document_id ~= "" then
         return self:exportReaderBook(document_id, booknotes, metadata)
     end
-    return self:sendToHighlightsAPI(booknotes, metadata, bookClippings(booknotes))
+
+    local highlights = {}
+    local correct_author = metadata.author
+    local source_url = metadata.source_url
+
+    -- Fallback to booknotes.author if no stored metadata, but clean it up
+    if not correct_author and booknotes.author and booknotes.author ~= "" then
+        -- Check if the author looks like a filename (contains file extensions)
+        if not booknotes.author:match("%.%w+$") and not booknotes.author:match("[/\\]") then
+            correct_author = booknotes.author:gsub("\n", ", ")
+        end
+    end
+
+    for _, chapter in ipairs(booknotes) do
+        for _, clipping in ipairs(chapter) do
+            local highlight = {
+                text = clipping.text,
+                title = booknotes.title,
+                author = correct_author,
+                source_url = source_url,
+                source_type = "koreader",
+                category = "articles",
+                note = clipping.note,
+                location = clipping.page,
+                location_type = "order",
+                highlighted_at = os.date("!%Y-%m-%dT%TZ", clipping.time),
+            }
+            table.insert(highlights, highlight)
+        end
+    end
+
+    local result, err = self.api:createReadwiseHighlights(highlights)
+
+    if not result then
+        logger.warn("HighlightExporter: error creating highlights", err)
+        return false, err
+    end
+    return true
 end
 
 return HighlightExporter
