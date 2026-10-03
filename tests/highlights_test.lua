@@ -409,6 +409,25 @@ test("identical passages are scoped to their document", function()
     eq(http_calls[2].body.parent_id, "doc-2")
 end)
 
+test("repeated passages share one highlight with every note", function()
+    local reader = newReader()
+    local notes = book({"Same", "Other", "Same", "Same"})
+    notes[1][1].note = "First"
+    notes[3][1].note = nil
+    notes[4][1].note = "Second"
+    replies = {
+        { code = 201, body = { id = "highlight-1" } },
+        { code = 201, body = { id = "highlight-2" } },
+    }
+    assert(reader:createHighlights(notes))
+    eq(#http_calls, 2)
+    eq(http_calls[1].body.content, "Same")
+    eq(http_calls[1].body.notes, "First\n\nSecond")
+    -- Without merging, the copies overwrote each other's note on every sync.
+    assert(newReader():createHighlights(notes))
+    eq(#http_calls, 2)
+end)
+
 test("non-Reader books and clippings without files keep legacy export", function()
     local reader = newReader()
     for _, file in ipairs({"/books/book.epub", false}) do

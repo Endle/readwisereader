@@ -43,14 +43,35 @@ function HighlightExporter:new(options)
     }, self)
 end
 
-local function bookClippings(booknotes)
-    local clippings = {}
+-- A Reader highlight is identified by its document and text, so repeated
+-- highlights of the same text become one passage carrying all of their notes.
+-- Returns the passages in book order and how many clippings had no text.
+local function bookPassages(booknotes)
+    local passages, by_text, skipped = {}, {}, 0
     for _, chapter in ipairs(booknotes) do
         for _, clipping in ipairs(chapter) do
-            clippings[#clippings + 1] = clipping
+            local text, note = clipping.text, clipping.note
+            if type(text) ~= "string" or not text:find("%S") then
+                skipped = skipped + 1
+            else
+                local passage = by_text[text]
+                if not passage then
+                    passage = { text = text, clipping = clipping, notes = {}, seen = {} }
+                    by_text[text] = passage
+                    passages[#passages + 1] = passage
+                end
+                -- Reader trims notes, so a whitespace-only note is blank too
+                if type(note) == "string" and note:find("%S") and not passage.seen[note] then
+                    passage.seen[note] = true
+                    passage.notes[#passage.notes + 1] = note
+                end
+            end
         end
     end
-    return clippings
+    for _, passage in ipairs(passages) do
+        passage.notes = table.concat(passage.notes, "\n\n")
+    end
+    return passages, skipped
 end
 
 -- The Readwise highlights API, for everything that is not a Reader article and
@@ -102,8 +123,17 @@ end
 function HighlightExporter:exportReaderBook(document_id, booknotes, metadata)
     local saved = self.history[document_id] or {}
     self.history[document_id] = saved
-    local fallback, queued = {}, {}
+    local fallback = {}
     local failure
+
+    local function fallBack(passage)
+        fallback[#fallback + 1] = {
+            text = passage.text,
+            note = passage.notes ~= "" and passage.notes or nil,
+            page = passage.clipping.page,
+            time = passage.clipping.time,
+        }
+    end
 
     local function record(passage, entry)
         saved[passage] = entry
@@ -112,20 +142,17 @@ function HighlightExporter:exportReaderBook(document_id, booknotes, metadata)
         self.save_history()
     end
 
-    for _, clipping in ipairs(bookClippings(booknotes)) do
-        local passage = clipping.text
-        local notes = clipping.note or ""
-        if not notes:find("%S") then
-            -- Reader trims notes, so a whitespace-only note is blank too
-            notes = ""
-        end
-        local has_text = type(passage) == "string" and passage:find("%S") ~= nil
-        local previous = has_text and saved[passage]
-        if not has_text then
-            -- e.g. an image selection; Reader has no passage to attach it to
-            logger.warn("HighlightExporter: skipping highlight without text in", document_id)
-        elseif queued[passage] or (previous and (previous.deleted or previous.notes == notes)) then
-            -- Already exported with this note, or a duplicate of a queued passage
+    local passages, skipped = bookPassages(booknotes)
+    if skipped > 0 then
+        -- e.g. image selections; Reader has no passage to attach them to
+        logger.warn("HighlightExporter: skipping", skipped, "highlight(s) without text in", document_id)
+    end
+
+    for _, entry in ipairs(passages) do
+        local passage, notes = entry.text, entry.notes
+        local previous = saved[passage]
+        if previous and (previous.deleted or previous.notes == notes) then
+            -- Already exported with this note, or deleted in Reader
             logger.dbg("HighlightExporter: passage unchanged in", document_id)
         elseif previous and previous.id then
             -- Editing a note must not create a second highlight. An empty
@@ -146,8 +173,7 @@ function HighlightExporter:exportReaderBook(document_id, booknotes, metadata)
         elseif previous then
             -- Rejected by Reader earlier. The highlights API matches the existing
             -- highlight by text, title, author and source URL, so this updates its note.
-            fallback[#fallback + 1] = clipping
-            queued[passage] = true
+            fallBack(entry)
         else
             local result, err, code, body = self.api:requestReader("POST", "/save/", {
                 parent_id = document_id,
@@ -165,8 +191,7 @@ function HighlightExporter:exportReaderBook(document_id, booknotes, metadata)
             elseif rejectsPassage(code, body) then
                 logger.warn("HighlightExporter: Reader rejected passage in", document_id, "with", code,
                     "response:", body, "passage:", passage)
-                fallback[#fallback + 1] = clipping
-                queued[passage] = true
+                fallBack(entry)
             else
                 failure = string.format("Could not create Reader highlight (%s).", tostring(code or err))
                 break
