@@ -247,22 +247,25 @@ test("partial failure preserves progress and retries only unsent passages", func
     local reader = newReader()
     replies = {
         { code = 201, body = { id = "highlight-1" } },
+        { code = 201, body = { id = "highlight-2" } },
         { code = 500 },
     }
-    local notes = book({"First", "Second", "Third"})
+    local notes = book({"First", "Second", "Third", "Fourth"})
     local ok, err = reader:createHighlights(notes)
     eq(ok, false)
     contains(err, "500")
-    eq(#http_calls, 2)
+    eq(#http_calls, 3)
+    -- History is saved once per book, including when the book fails.
     eq(flushes, 1)
-    eq(stored.readwisereader.reader_highlights["doc-1"].Second, nil)
+    eq(stored.readwisereader.reader_highlights["doc-1"].Second.id, "highlight-2")
+    eq(stored.readwisereader.reader_highlights["doc-1"].Third, nil)
     replies = {
-        { code = 201, body = { id = "highlight-2" } },
         { code = 201, body = { id = "highlight-3" } },
+        { code = 201, body = { id = "highlight-4" } },
     }
     assert(newReader():createHighlights(notes))
-    eq(#http_calls, 4)
-    eq(http_calls[3].body.content, "Second")
+    eq(#http_calls, 5)
+    eq(http_calls[4].body.content, "Third")
 end)
 
 test("rejected passages fall back to the highlights API once", function()
@@ -296,7 +299,7 @@ test("rejected passages fall back to the highlights API once", function()
     contains(warnings[#warnings], "content not found")
     contains(warnings[#warnings], "Second")
     eq(stored.readwisereader.reader_highlights["doc-1"].Second.fallback, true)
-    eq(flushes, 3)
+    eq(flushes, 1)
     -- Later syncs never offer the passage to Reader again; note edits are resent
     -- through the highlights API, which updates the matching highlight.
     assert(newReader():createHighlights(notes))

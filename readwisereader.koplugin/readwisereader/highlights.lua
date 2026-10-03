@@ -1,6 +1,6 @@
 -- Highlight export rules, independent of KOReader widgets and file parsing.
--- history is the persisted document/passage map. save_history checkpoints each
--- successful create/update through the caller's settings storage.
+-- history is the persisted document/passage map. save_history persists it
+-- through the caller's settings storage, once per exported book.
 local logger = require("logger")
 
 local HighlightExporter = {}
@@ -124,7 +124,7 @@ function HighlightExporter:exportReaderBook(document_id, booknotes, metadata)
     local saved = self.history[document_id] or {}
     self.history[document_id] = saved
     local fallback = {}
-    local failure
+    local failure, changed
 
     local function fallBack(passage)
         fallback[#fallback + 1] = {
@@ -137,9 +137,7 @@ function HighlightExporter:exportReaderBook(document_id, booknotes, metadata)
 
     local function record(passage, entry)
         saved[passage] = entry
-        -- Save each success immediately: a later failure must not cause
-        -- already exported passages to be sent again on the next sync.
-        self.save_history()
+        changed = true
     end
 
     local passages, skipped = bookPassages(booknotes)
@@ -204,15 +202,21 @@ function HighlightExporter:exportReaderBook(document_id, booknotes, metadata)
     if #fallback > 0 then
         local ok, err = exportViaHighlightsApi(self.api,
             { title = booknotes.title, author = booknotes.author, fallback }, metadata)
-        if not ok then
+        if ok then
+            for _, clipping in ipairs(fallback) do
+                record(clipping.text, { fallback = true, notes = clipping.note or "" })
+            end
+        else
             local fallback_failure = string.format(
                 "Reader rejected %d highlight(s) and the Readwise highlights API failed (%s).",
                 #fallback, tostring(err))
-            return false, failure and (failure .. "\n" .. fallback_failure) or fallback_failure
+            failure = failure and (failure .. "\n" .. fallback_failure) or fallback_failure
         end
-        for _, clipping in ipairs(fallback) do
-            saved[clipping.text] = { fallback = true, notes = clipping.note or "" }
-        end
+    end
+
+    -- Saved even when the book failed, so the next sync does not send the
+    -- passages that did succeed again.
+    if changed then
         self.save_history()
     end
 
