@@ -10,11 +10,13 @@ A plugin for KOReader integration with the highlight saving and read later servi
 - Optionally, the plugin will only sync articles tagged as 'koreader' in Readwise (off by default).
 - The number of articles downloaded per sync can be limited in the settings menu (default: unlimited).
 - Highlights and notes that are saved in KOReader are exported to Readwise in the same sync process (disabled by default - enable in the settings menu). 
+- Highlights in downloaded Reader articles are attached to the original article in Reader, and editing or clearing a note updates that highlight. Other items are exported to Readwise as before.
 - Very image heavy files will download, but may cause KOReader to crash if the file is very large and your ereader can’t cope with this. Due to the way images are saved and the limitations of HTML files, this is more of an issue than with EPUBs. To mitigate this, there is a setting to allow the user to cap the size of a file, after which further images are not downloaded. This is set to 10MB by default, but may be changed according to the limits of the user’s setup. There is also a toggle to turn off image downloads completely if required.
 
 ## Limitations and Known Issues:
 - Unfortunately two way highlight syncing is not possible as the Readwise Reader API does not provide the location data required by KOReader.
-- Highlights that this plugin creates in Readwise will not link back to the original article in Readwise Reader. Again, this is an API limitation - see the discussion [here](https://github.com/tomtom800/readwisereader/issues/20). 
+- Highlights exported before this version, and passages Reader cannot match to its copy of the article, will not link back to the original article in Readwise Reader - see the discussion [here](https://github.com/tomtom800/readwisereader/issues/20). 
+- Exported Reader highlights are remembered in the plugin settings by article and exact text. Resetting those settings can export them again; editing a highlight's text creates a new highlight, and deleting one locally does not delete it in Reader.
 - If any highlight export fails, sync still downloads new articles but does not remove or archive any local ones, so annotations that were not exported stay on the device. Retry after resolving the error. The Advanced sync archive/delete actions remain explicit manual actions.
 - I am not planning to add any options to style the documents. However there are lots of tweaks you can apply as a user - see [here](https://koreader.rocks/user_guide/#L1-customizingappearance). 
 

@@ -111,6 +111,10 @@ function ReadwiseReader:init()
     -- Initialize source URL metadata storage (for highlight export)
     self.document_source_urls = settings.document_source_urls or {}
 
+    -- Reader highlight IDs and last exported notes, keyed by document and passage.
+    -- Keep these after cleanup so re-downloaded articles retain export history.
+    self.reader_highlights = settings.reader_highlights or {}
+
     -- Initialize image download settings
     self.download_images = settings.download_images == nil and true or settings.download_images
     self.max_image_size_mb = settings.max_image_size_mb or 10
@@ -131,7 +135,11 @@ function ReadwiseReader:init()
             end
         end,
     }
-    self.highlight_exporter = HighlightExporter:new{ api = self.api }
+    self.highlight_exporter = HighlightExporter:new{
+        api = self.api,
+        history = self.reader_highlights,
+        save_history = function() self:saveSettings() end,
+    }
 
     -- Initialize highlights parser with a mock UI to satisfy new clip.lua requirements
     local mock_ui = {
@@ -440,6 +448,7 @@ end
 function ReadwiseReader:createHighlights(booknotes)
     local document_id = booknotes.file and self:getDocumentIdFromPath(booknotes.file)
     return self.highlight_exporter:exportBook(booknotes, {
+        document_id = document_id,
         author = document_id and self:getStoredAuthor(document_id),
         source_url = document_id and self:getStoredSourceUrl(document_id),
     })
@@ -2290,6 +2299,7 @@ function ReadwiseReader:saveSettings()
         document_locations = self.document_locations,
         document_authors = self.document_authors,
         document_source_urls = self.document_source_urls,
+        reader_highlights = self.reader_highlights,
         download_images = self.download_images,
         max_image_size_mb = self.max_image_size_mb,
         max_articles_to_download = self.max_articles_to_download,
