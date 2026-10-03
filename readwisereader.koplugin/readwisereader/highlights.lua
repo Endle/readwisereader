@@ -6,6 +6,10 @@ local logger = require("logger")
 local HighlightExporter = {}
 HighlightExporter.__index = HighlightExporter
 
+-- Reader answers 400 when a passage does not match its copy of the article, and
+-- may answer 404 once the article is deleted. Retrying cannot fix either.
+local REJECTED_BY_READER = { [400] = true, [404] = true }
+
 function HighlightExporter:new(options)
     return setmetatable({
         api = assert(options.api),
@@ -14,62 +18,19 @@ function HighlightExporter:new(options)
     }, self)
 end
 
-function HighlightExporter:createReaderHighlights(document_id, booknotes)
-    local saved = self.history[document_id] or {}
-    self.history[document_id] = saved
-
+local function bookClippings(booknotes)
+    local clippings = {}
     for _, chapter in ipairs(booknotes) do
         for _, clipping in ipairs(chapter) do
-            local passage = clipping.text
-            if type(passage) ~= "string" or not passage:find("%S") then
-                return false, "Reader requires a non-empty text highlight."
-            end
-            local notes = clipping.note or ""
-            local previous = saved[passage]
-            local result, err, code
-            if previous and previous.notes ~= notes then
-                -- Editing a note must not create a second highlight. An empty
-                -- string explicitly removes a previously exported note.
-                result, err, code = self.api:requestReader("PATCH", "/update/" .. previous.id .. "/",
-                    { notes = notes })
-                if not result then
-                    return false, string.format("Could not update highlight note (%s).", tostring(code or err))
-                end
-            elseif not previous then
-                result, err, code = self.api:requestReader("POST", "/save/", {
-                    parent_id = document_id,
-                    content = passage,
-                    notes = notes,
-                    saved_using = "koreader",
-                })
-                if not result then
-                    if code == 400 then
-                        return false, "Reader rejected the highlight; its text may not match the original article."
-                    end
-                    return false, string.format("Could not create Reader highlight (%s).", tostring(code or err))
-                end
-                if type(result) ~= "table" or type(result.id) ~= "string" or result.id == "" then
-                    return false, "Reader did not return a highlight ID."
-                end
-            end
-            if result then
-                saved[passage] = { id = previous and previous.id or result.id, notes = notes }
-                -- Save each success immediately: a later failure must not cause
-                -- already exported passages to be sent again on the next sync.
-                self.save_history()
-            end
+            clippings[#clippings + 1] = clipping
         end
     end
-    return true
+    return clippings
 end
 
--- metadata is resolved by the caller from the local document identity.
-function HighlightExporter:exportBook(booknotes, metadata)
-    local document_id = metadata.document_id
-    if document_id and document_id ~= "" then
-        return self:createReaderHighlights(document_id, booknotes)
-    end
-
+-- Sends clippings through the Readwise highlights API (v2). It matches existing
+-- highlights by text, title, author and source URL, so resending updates a note.
+function HighlightExporter:sendToHighlightsAPI(booknotes, metadata, clippings)
     local highlights = {}
     local correct_author = metadata.author
     local source_url = metadata.source_url
@@ -82,22 +43,20 @@ function HighlightExporter:exportBook(booknotes, metadata)
         end
     end
 
-    for _, chapter in ipairs(booknotes) do
-        for _, clipping in ipairs(chapter) do
-            local highlight = {
-                text = clipping.text,
-                title = booknotes.title,
-                author = correct_author,
-                source_url = source_url,
-                source_type = "koreader",
-                category = "articles",
-                note = clipping.note,
-                location = clipping.page,
-                location_type = "order",
-                highlighted_at = os.date("!%Y-%m-%dT%TZ", clipping.time),
-            }
-            table.insert(highlights, highlight)
-        end
+    for _, clipping in ipairs(clippings) do
+        local highlight = {
+            text = clipping.text,
+            title = booknotes.title,
+            author = correct_author,
+            source_url = source_url,
+            source_type = "koreader",
+            category = "articles",
+            note = clipping.note,
+            location = clipping.page,
+            location_type = "order",
+            highlighted_at = os.date("!%Y-%m-%dT%TZ", clipping.time),
+        }
+        table.insert(highlights, highlight)
     end
 
     local result, err = self.api:createReadwiseHighlights(highlights)
@@ -107,6 +66,101 @@ function HighlightExporter:exportBook(booknotes, metadata)
         return false, err
     end
     return true
+end
+
+-- Reader records are { id, notes }. Passages Reader rejected are recorded as
+-- { fallback = true, notes } and only ever go through the highlights API again.
+function HighlightExporter:exportReaderBook(document_id, booknotes, metadata)
+    local saved = self.history[document_id] or {}
+    self.history[document_id] = saved
+    local fallback, queued = {}, {}
+    local failure
+
+    local function record(passage, entry)
+        saved[passage] = entry
+        -- Save each success immediately: a later failure must not cause
+        -- already exported passages to be sent again on the next sync.
+        self.save_history()
+    end
+
+    for _, clipping in ipairs(bookClippings(booknotes)) do
+        local passage = clipping.text
+        local notes = clipping.note or ""
+        local has_text = type(passage) == "string" and passage:find("%S") ~= nil
+        local previous = has_text and saved[passage]
+        if not has_text then
+            -- e.g. an image selection; Reader has no passage to attach it to
+            logger.warn("HighlightExporter: skipping highlight without text in", document_id)
+        elseif queued[passage] or (previous and previous.notes == notes) then
+            -- Already exported with this note, or a duplicate of a queued passage
+            logger.dbg("HighlightExporter: passage unchanged in", document_id)
+        elseif previous and previous.id then
+            -- Editing a note must not create a second highlight. An empty
+            -- string explicitly removes a previously exported note.
+            local result, err, code = self.api:requestReader("PATCH", "/update/" .. previous.id .. "/",
+                { notes = notes })
+            if not result then
+                failure = string.format("Could not update highlight note (%s).", tostring(code or err))
+                break
+            end
+            record(passage, { id = previous.id, notes = notes })
+        elseif previous then
+            fallback[#fallback + 1] = clipping
+            queued[passage] = true
+        else
+            local result, err, code, body = self.api:requestReader("POST", "/save/", {
+                parent_id = document_id,
+                content = passage,
+                notes = notes,
+                saved_using = "koreader",
+            })
+            if result then
+                if type(result) ~= "table" or type(result.id) ~= "string" or result.id == "" then
+                    failure = "Reader did not return a highlight ID."
+                    break
+                end
+                record(passage, { id = result.id, notes = notes })
+            elseif REJECTED_BY_READER[code] then
+                logger.warn("HighlightExporter: Reader rejected passage in", document_id, "with", code,
+                    "response:", body, "passage:", passage)
+                fallback[#fallback + 1] = clipping
+                queued[passage] = true
+            else
+                failure = string.format("Could not create Reader highlight (%s).", tostring(code or err))
+                break
+            end
+        end
+    end
+
+    -- Send rejected passages even when a later one failed, so they are not
+    -- offered to Reader again on the next sync.
+    if #fallback > 0 then
+        local ok, err = self:sendToHighlightsAPI(booknotes, metadata, fallback)
+        if not ok then
+            local fallback_failure = string.format(
+                "Reader rejected %d highlight(s) and the Readwise highlights API failed (%s).",
+                #fallback, tostring(err))
+            return false, failure and (failure .. "\n" .. fallback_failure) or fallback_failure
+        end
+        for _, clipping in ipairs(fallback) do
+            saved[clipping.text] = { fallback = true, notes = clipping.note or "" }
+        end
+        self.save_history()
+    end
+
+    if failure then
+        return false, failure
+    end
+    return true
+end
+
+-- metadata is resolved by the caller from the local document identity.
+function HighlightExporter:exportBook(booknotes, metadata)
+    local document_id = metadata.document_id
+    if document_id and document_id ~= "" then
+        return self:exportReaderBook(document_id, booknotes, metadata)
+    end
+    return self:sendToHighlightsAPI(booknotes, metadata, bookClippings(booknotes))
 end
 
 return HighlightExporter

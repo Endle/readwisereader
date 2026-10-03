@@ -175,8 +175,10 @@ function ReadwiseAPI:requestReader(method, endpoint, body)
             return true
         end
     else
-        logger.err("ReadwiseAPI:requestReader: HTTP error", code, status)
-        return nil, "http_error", code
+        -- the body is Reader's explanation, e.g. why /save/ rejected a highlight
+        local error_body = table.concat(sink)
+        logger.err("ReadwiseAPI:requestReader: HTTP error", code, status, error_body)
+        return nil, "http_error", code, error_body
     end
 end
 
