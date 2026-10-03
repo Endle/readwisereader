@@ -10,7 +10,7 @@ A plugin for KOReader integration with the highlight saving and read later servi
 - Optionally, the plugin will only sync articles tagged as 'koreader' in Readwise (off by default).
 - The number of articles downloaded per sync can be limited in the settings menu (default: unlimited).
 - Highlights and notes that are saved in KOReader are exported to Readwise in the same sync process (disabled by default - enable in the settings menu). 
-- Highlights in downloaded Reader articles are attached to the original article in Reader, and editing or clearing a note updates that highlight. Other books, and passages Reader cannot find in its copy of the article, are exported to Readwise as before.
+- Highlights in downloaded Reader articles are attached to the original article in Reader, and editing or clearing a note updates that highlight. Other items are exported to Readwise as before.
 - Very image heavy files will download, but may cause KOReader to crash if the file is very large and your ereader can’t cope with this. Due to the way images are saved and the limitations of HTML files, this is more of an issue than with EPUBs. To mitigate this, there is a setting to allow the user to cap the size of a file, after which further images are not downloaded. This is set to 10MB by default, but may be changed according to the limits of the user’s setup. There is also a toggle to turn off image downloads completely if required.
 
 ## Limitations and Known Issues:
