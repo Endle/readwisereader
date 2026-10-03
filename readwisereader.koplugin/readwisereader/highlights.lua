@@ -88,6 +88,10 @@ function HighlightExporter:exportReaderBook(document_id, booknotes, metadata)
     for _, clipping in ipairs(bookClippings(booknotes)) do
         local passage = clipping.text
         local notes = clipping.note or ""
+        if not notes:find("%S") then
+            -- Reader trims notes, so a whitespace-only note is blank too
+            notes = ""
+        end
         local has_text = type(passage) == "string" and passage:find("%S") ~= nil
         local previous = has_text and saved[passage]
         if not has_text then

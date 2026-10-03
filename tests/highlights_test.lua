@@ -175,6 +175,20 @@ test("highlights without a note omit notes when created", function()
     eq(stored.readwisereader.reader_highlights["doc-1"].Passage.notes, "")
 end)
 
+test("whitespace-only notes count as blank", function()
+    -- Reader trims notes, so " " would be rejected as blank (400) like "".
+    local reader = newReader()
+    local notes = book({"Passage"})
+    notes[1][1].note = " \n"
+    replies = {{ code = 201, body = { id = "highlight-1" } }}
+    assert(reader:createHighlights(notes))
+    eq(http_calls[1].body.notes, nil)
+    eq(stored.readwisereader.reader_highlights["doc-1"].Passage.notes, "")
+    notes[1][1].note = nil
+    assert(newReader():createHighlights(notes))
+    eq(#http_calls, 1)
+end)
+
 test("successful exports survive restart and skip repeated syncs", function()
     local reader = newReader()
     replies = {{ code = 200, body = { id = "highlight-1" } }}
