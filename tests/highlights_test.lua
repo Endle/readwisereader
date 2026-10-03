@@ -286,6 +286,36 @@ test("rejected passages fall back to the highlights API once", function()
     eq(http_calls[5].body.highlights[1].note, "Edited note")
 end)
 
+test("validation errors on plugin-chosen fields fail instead of falling back", function()
+    -- e.g. the blank-notes 400: falling back would hide the bug and skip Reader
+    -- for that passage forever.
+    local reader = newReader()
+    replies = {{ code = 400, raw = '{"notes": ["This field may not be blank."]}' }}
+    local ok, err = reader:createHighlights(book({"Passage"}))
+    eq(ok, false)
+    contains(err, "400")
+    eq(#http_calls, 1)
+    eq(stored.readwisereader.reader_highlights, nil)
+    replies = {{ code = 201, body = { id = "highlight-1" } }}
+    assert(newReader():createHighlights(book({"Passage"})))
+    eq(http_calls[2].url, "https://readwise.io/api/v3/save/")
+end)
+
+test("400s about the passage or its parent still fall back", function()
+    for _, body in ipairs({
+        '{"content": ["Not found in the document."]}',
+        '{"parent_id": ["Invalid parent."], "notes": ["Ensure this field has no more than 8191 characters."]}',
+    }) do
+        local reader = newReader()
+        replies = {
+            { code = 400, raw = body },
+            { code = 200, body = {} },
+        }
+        assert(reader:createHighlights(book({"Passage"})))
+        eq(http_calls[#http_calls].url, "https://readwise.io/api/v2/highlights")
+    end
+end)
+
 test("deleted parent documents fall back instead of blocking sync", function()
     local reader = newReader()
     replies = {

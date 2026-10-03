@@ -6,9 +6,34 @@ local logger = require("logger")
 local HighlightExporter = {}
 HighlightExporter.__index = HighlightExporter
 
--- Reader answers 400 when a passage does not match its copy of the article, and
--- may answer 404 once the article is deleted. Retrying cannot fix either.
-local REJECTED_BY_READER = { [400] = true, [404] = true }
+-- Fields of the /save/ request whose values this plugin chooses itself.
+local REQUEST_FIELDS = { "notes", "saved_using" }
+
+-- Reader answers 400 when it cannot attach a passage to its copy of the article,
+-- and may answer 404 once the article is deleted. Retrying cannot fix either. A
+-- 400 that only names a field this plugin chooses, such as
+-- {"notes": ["This field may not be blank."]}, is a bug in the request instead:
+-- falling back would hide it and skip Reader for that passage for good.
+local function rejectsPassage(code, body)
+    if code == 404 then
+        return true
+    elseif code ~= 400 then
+        return false
+    end
+    body = body or ""
+    local function names(field)
+        return body:find('"' .. field .. '"%s*:') ~= nil
+    end
+    if names("content") or names("parent_id") then
+        return true
+    end
+    for _, field in ipairs(REQUEST_FIELDS) do
+        if names(field) then
+            return false
+        end
+    end
+    return true
+end
 
 function HighlightExporter:new(options)
     return setmetatable({
@@ -129,7 +154,7 @@ function HighlightExporter:exportReaderBook(document_id, booknotes, metadata)
                     break
                 end
                 record(passage, { id = result.id, notes = notes })
-            elseif REJECTED_BY_READER[code] then
+            elseif rejectsPassage(code, body) then
                 logger.warn("HighlightExporter: Reader rejected passage in", document_id, "with", code,
                     "response:", body, "passage:", passage)
                 fallback[#fallback + 1] = clipping
