@@ -221,6 +221,28 @@ test("note edits and removal update the saved highlight", function()
     eq(#http_calls, 3)
 end)
 
+test("highlights deleted in Reader stop blocking sync and are not recreated", function()
+    local reader = newReader()
+    local notes = book({"Deleted", "Later"})
+    replies = {
+        { code = 201, body = { id = "highlight-1" } },
+        { code = 201, body = { id = "highlight-2" } },
+    }
+    assert(reader:createHighlights(notes))
+    notes[1][1].note = "Edited after deletion"
+    notes[2][1].note = "Edited too"
+    replies = {
+        { code = 404 },
+        { code = 200, body = { id = "highlight-2" } },
+    }
+    assert(newReader():createHighlights(notes))
+    eq(http_calls[4].url, "https://readwise.io/api/v3/update/highlight-2/")
+    eq(stored.readwisereader.reader_highlights["doc-1"].Deleted.deleted, true)
+    notes[1][1].note = "Edited again"
+    assert(newReader():createHighlights(notes))
+    eq(#http_calls, 4)
+end)
+
 test("partial failure preserves progress and retries only unsent passages", function()
     local reader = newReader()
     replies = {

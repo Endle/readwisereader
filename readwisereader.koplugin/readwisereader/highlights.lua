@@ -97,6 +97,8 @@ end
 
 -- Reader records are { id, notes }. Passages Reader rejected are recorded as
 -- { fallback = true, notes } and only ever go through the highlights API again.
+-- Highlights deleted in Reader are recorded as { deleted = true, notes } and
+-- left alone.
 function HighlightExporter:exportReaderBook(document_id, booknotes, metadata)
     local saved = self.history[document_id] or {}
     self.history[document_id] = saved
@@ -122,7 +124,7 @@ function HighlightExporter:exportReaderBook(document_id, booknotes, metadata)
         if not has_text then
             -- e.g. an image selection; Reader has no passage to attach it to
             logger.warn("HighlightExporter: skipping highlight without text in", document_id)
-        elseif queued[passage] or (previous and previous.notes == notes) then
+        elseif queued[passage] or (previous and (previous.deleted or previous.notes == notes)) then
             -- Already exported with this note, or a duplicate of a queued passage
             logger.dbg("HighlightExporter: passage unchanged in", document_id)
         elseif previous and previous.id then
@@ -130,11 +132,17 @@ function HighlightExporter:exportReaderBook(document_id, booknotes, metadata)
             -- string explicitly removes a previously exported note.
             local result, err, code = self.api:requestReader("PATCH", "/update/" .. previous.id .. "/",
                 { notes = notes })
-            if not result then
+            if result then
+                record(passage, { id = previous.id, notes = notes })
+            elseif code == 404 then
+                -- Deleted in Reader since it was exported. Respect that rather
+                -- than recreating it, and stop retrying the update.
+                logger.warn("HighlightExporter: highlight", previous.id, "no longer exists in", document_id)
+                record(passage, { deleted = true, notes = notes })
+            else
                 failure = string.format("Could not update highlight note (%s).", tostring(code or err))
                 break
             end
-            record(passage, { id = previous.id, notes = notes })
         elseif previous then
             -- Rejected by Reader earlier. The highlights API matches the existing
             -- highlight by text, title, author and source URL, so this updates its note.
