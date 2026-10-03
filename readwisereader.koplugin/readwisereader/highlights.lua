@@ -73,7 +73,8 @@ function HighlightExporter:exportReaderBook(document_id, booknotes, metadata)
             local result, err, code, body = self.api:requestReader("POST", "/save/", {
                 parent_id = document_id,
                 content = passage,
-                notes = notes,
+                -- create rejects a blank note with 400; only PATCH accepts "" (to clear)
+                notes = notes ~= "" and notes or nil,
                 saved_using = "koreader",
             })
             if result then

@@ -165,6 +165,16 @@ test("Reader payload preserves text and accepts 201", function()
     eq(stored.readwisereader.reader_highlights["doc-1"][text].id, "highlight-1")
 end)
 
+test("highlights without a note omit notes when created", function()
+    local reader = newReader()
+    local notes = book({"Passage"})
+    notes[1][1].note = nil
+    replies = {{ code = 201, body = { id = "highlight-1" } }}
+    assert(reader:createHighlights(notes))
+    eq(http_calls[1].body.notes, nil)
+    eq(stored.readwisereader.reader_highlights["doc-1"].Passage.notes, "")
+end)
+
 test("successful exports survive restart and skip repeated syncs", function()
     local reader = newReader()
     replies = {{ code = 200, body = { id = "highlight-1" } }}
