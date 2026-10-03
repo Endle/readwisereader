@@ -212,6 +212,80 @@ test("rate-limit retries are bounded", function()
     eq(#http_calls, 3)
 end)
 
+test("book export errors reach the caller, including partial success", function()
+    local reader = newReader()
+    reader.parseAllBooks = function() return { good = book({"Good"}), bad = book({"Bad"}, "doc-2") } end
+    reader.createHighlights = function(_, notes)
+        if notes[1][1].text == "Good" then return true end
+        return false, "Text mismatch"
+    end
+    local count, err = reader:exportHighlights()
+    eq(count, 1)
+    contains(err, "Text mismatch")
+end)
+
+test("failure to save open annotations stops parsing", function()
+    local reader = newReader()
+    reader.ui.document = {}
+    reader.ui.saveSettings = function() error("disk full") end
+    reader.parser.parseHistory = function() error("must not parse stale annotations") end
+    local _, err = reader:exportHighlights()
+    contains(err, "disk full")
+end)
+
+test("failed export keeps local files and sync cursor but still downloads", function()
+    for _, failure in ipairs({"parse", "export"}) do
+        for _, server_documents in ipairs({ {}, {{ id = "new-doc", title = "New" }} }) do
+            local reader = newReader()
+            reader.export_highlights_at_sync = true
+            reader.archive_finished = true
+            reader.last_sync_time = "previous-sync"
+            reader.validateSettings = function() return true end
+            reader.parseAllBooks = function()
+                if failure == "parse" then error("parse failed") end
+                return { article = book({"Passage"}) }
+            end
+            reader.createHighlights = function() return false, "export failed" end
+            local function forbidden() error("must not delete local files after failed export") end
+            reader.cleanupArchivedDocuments = forbidden
+            reader.processFinishedDocuments = forbidden
+            reader.reconcileLocalDocuments = forbidden
+            reader.getDocumentList = function() return server_documents end
+            reader.updateAvailableTags = noop
+            reader.documentExists = function() return false end
+            reader.initCollectionTracking = noop
+            reader.saveCollections = noop
+            local downloads = 0
+            reader.downloadDocument = function() downloads = downloads + 1; return "downloaded" end
+            reader:synchronize()
+            eq(downloads, #server_documents)
+            eq(reader.last_sync_time, "previous-sync")
+            local shown = table.concat(messages, "\n")
+            contains(shown, "no local articles will be removed")
+            contains(shown, failure .. " failed")
+        end
+    end
+end)
+
+test("sync still cleans up when export succeeds or is disabled", function()
+    for _, enabled in ipairs({true, false}) do
+        local reader = newReader()
+        reader.export_highlights_at_sync = enabled
+        reader.validateSettings = function() return true end
+        reader.exportHighlights = function()
+            assert(enabled, "export must respect the toggle")
+            return 1, nil
+        end
+        local cleanup, archive = false, false
+        reader.cleanupArchivedDocuments = function() cleanup = true; return 0 end
+        reader.processFinishedDocuments = function() archive = true; return 0, 0 end
+        -- Stop after cleanup, before the unrelated download/UI pipeline.
+        reader.getDocumentList = function() return nil end
+        reader:synchronize()
+        assert(cleanup and archive)
+    end
+end)
+
 test("API requests read the current token after settings change", function()
     local reader = newReader()
     replies = {
