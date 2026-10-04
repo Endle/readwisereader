@@ -268,14 +268,19 @@ test("partial failure preserves progress and retries only unsent passages", func
     eq(http_calls[4].body.content, "Third")
 end)
 
-test("rejected passages fall back to the highlights API once", function()
-    local warnings = {}
-    local logger = require("logger")
-    logger.warn = function(...)
+local function captureLog(level)
+    local lines = {}
+    require("logger")[level] = function(...)
         local parts = {}
         for i = 1, select("#", ...) do parts[i] = tostring((select(i, ...))) end
-        warnings[#warnings + 1] = table.concat(parts, " ")
+        lines[#lines + 1] = table.concat(parts, " ")
     end
+    return lines
+end
+
+test("rejected passages fall back to the highlights API once", function()
+    local errors, warnings = captureLog("err"), captureLog("warn")
+    local logger = require("logger")
     local reader = newReader()
     reader.document_authors = { ["doc-1"] = "Stored Author" }
     reader.document_source_urls = { ["doc-1"] = "https://example.com/article" }
@@ -287,7 +292,7 @@ test("rejected passages fall back to the highlights API once", function()
         { code = 200, body = {} },
     }
     local ok = reader:createHighlights(notes)
-    logger.warn = noop
+    logger.err, logger.warn = noop, noop
     assert(ok)
     eq(http_calls[4].url, "https://readwise.io/api/v2/highlights")
     eq(#http_calls[4].body.highlights, 1)
@@ -296,8 +301,10 @@ test("rejected passages fall back to the highlights API once", function()
     eq(highlight.note, "My note")
     eq(highlight.author, "Stored Author")
     eq(highlight.source_url, "https://example.com/article")
-    contains(warnings[#warnings], "content not found")
-    contains(warnings[#warnings], "Second")
+    contains(errors[#errors], "content not found")
+    contains(warnings[#warnings], "rejected")
+    -- Highlight text is private; it is only logged at debug level.
+    for _, line in ipairs(warnings) do assert(not line:find("Second", 1, true), line) end
     eq(stored.readwisereader.reader_highlights["doc-1"].Second.fallback, true)
     eq(flushes, 1)
     -- Later syncs never offer the passage to Reader again; note edits are resent
@@ -637,6 +644,18 @@ test("transport retries safe reads and strips nested JSON nulls", function()
     eq(reader:callAPI("PATCH", "/update/doc-1/", { location = "archive" }), true)
 end)
 
+
+test("large error bodies are returned whole but logged truncated", function()
+    local errors = captureLog("err")
+    local reader = newReader()
+    local page = "<html>" .. string.rep("x", 5000) .. "</html>"
+    replies = {{ code = 400, raw = page }}
+    local _, _, code, body = reader.api:requestReader("POST", "/save/", {})
+    require("logger").err = noop
+    eq(code, 400)
+    eq(body, page)
+    assert(#errors[1] < 600, #errors[1])
+end)
 
 test("only the plugin presents interactive API errors", function()
     local reader = newReader()

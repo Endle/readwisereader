@@ -175,9 +175,10 @@ function ReadwiseAPI:requestReader(method, endpoint, body)
             return true
         end
     else
-        -- the body is Reader's explanation, e.g. why /save/ rejected a highlight
+        -- the body is Reader's explanation, e.g. why /save/ rejected a highlight.
+        -- Proxies can answer with a whole HTML page, so only its start is logged.
         local error_body = table.concat(sink)
-        logger.err("ReadwiseAPI:requestReader: HTTP error", code, status, error_body)
+        logger.err("ReadwiseAPI:requestReader: HTTP error", code, status, error_body:sub(1, 500))
         return nil, "http_error", code, error_body
     end
 end
