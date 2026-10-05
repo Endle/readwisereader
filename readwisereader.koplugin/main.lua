@@ -25,6 +25,7 @@ local logger = require("logger")
 -- file, so plugin modules must be required here, never lazily inside a function.
 local ReadwiseAPI = require("readwisereader/api")
 local HighlightExporter = require("readwisereader/highlights")
+local ReaderCovers = require("readwisereader/covers")
 
 local BD = require("ui/bidi")
 local DataStorage = require("datastorage")
@@ -1543,13 +1544,19 @@ function ReadwiseReader:documentExists(doc_id)
     return self:findLocalDocumentByReadwiseId(doc_id) ~= nil
 end
 
+function ReadwiseReader:syncDocumentCover(filepath, document)
+    return ReaderCovers:sync(filepath, document.image_url, self.download_images, self.max_image_size_mb)
+end
+
 function ReadwiseReader:downloadDocument(document)
     if self:shouldSkipDocument(document) then
         logger.dbg("ReadwiseReader:downloadDocument: skipping", document.id, "- has excluded tags or location")
         return "skipped"
     end
     
-    if self:documentExists(document.id) then
+    local existing_filepath = self:findLocalDocumentByReadwiseId(document.id)
+    if existing_filepath then
+        self:syncDocumentCover(existing_filepath, document)
         logger.dbg("ReadwiseReader:downloadDocument: skipping", document.id, "- already exists")
         return "skipped"
     end
@@ -1606,6 +1613,8 @@ function ReadwiseReader:downloadDocument(document)
         if not status then
             logger.warn("ReadwiseReader:downloadDocument: metadata writing failed:", err)
         end
+
+        self:syncDocumentCover(filepath, document)
 
         -- Update KOReader collections
         local coll_status, coll_err = pcall(function() self:updateDocumentCollections(filepath, document) end)
@@ -2161,16 +2170,22 @@ function ReadwiseReader:synchronize()
 
     local filtered_documents = {}
     local existing_count = 0
+    local covers_downloaded = 0
 
     for _, document in ipairs(documents) do
         if self:documentExists(document.id) then
             existing_count = existing_count + 1
+            local filepath = self:findLocalDocumentByReadwiseId(document.id)
+            self:showProgress(string.format("Checking cover: %s", document.title or "Untitled"))
+            if filepath and self:syncDocumentCover(filepath, document) then
+                covers_downloaded = covers_downloaded + 1
+            end
         else
             table.insert(filtered_documents, document)
         end
     end
 
-    if #filtered_documents == 0 and cleaned_count == 0 and archived_count == 0 and highlights_exported == 0 and reconciled_count == 0 then
+    if #filtered_documents == 0 and covers_downloaded == 0 and cleaned_count == 0 and archived_count == 0 and highlights_exported == 0 and reconciled_count == 0 then
         local msg = "No new articles found and no changes to process."
         if existing_count > 0 then
             msg = msg .. "\n" .. string.format("Skipped %d existing articles.", existing_count)
@@ -2231,6 +2246,10 @@ function ReadwiseReader:synchronize()
         msg = msg .. "\n" .. string.format("Downloaded: %d", downloaded)
     end
     
+    if covers_downloaded > 0 then
+        msg = msg .. "\n" .. string.format("Covers downloaded: %d", covers_downloaded)
+    end
+
     if existing_count > 0 then
         msg = msg .. "\n" .. string.format("Skipped (already exists): %d", existing_count)
     end

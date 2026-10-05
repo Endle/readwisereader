@@ -104,7 +104,7 @@ local unused = {
     "ui/bidi", "docsettings", "ui/event", "ffi/util", "apps/filemanager/filemanager",
     "ui/widget/inputdialog", "ui/widget/confirmbox", "ui/widget/multiconfirmbox",
     "readcollection", "ui/network/manager", "readhistory", "apps/filemanager/filemanagerutil",
-    "libs/libkoreader-lfs", "mime",
+    "libs/libkoreader-lfs", "mime", "ui/renderimage",
 }
 for _, name in ipairs(unused) do modules[name] = {} end
 for name, module in pairs(modules) do
