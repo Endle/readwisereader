@@ -116,10 +116,10 @@ local function exportViaHighlightsApi(api, booknotes, metadata)
     return true
 end
 
--- Reader records are { id, notes }. Passages Reader rejected are recorded as
--- { fallback = true, notes } and only ever go through the highlights API again.
--- Highlights deleted in Reader are recorded as { deleted = true, notes } and
--- left alone.
+-- Each passage is exported once; notes added or edited later are not sent.
+-- Reader records are { id, notes } and passages Reader rejected are
+-- { fallback = true, notes }, keeping what was sent as a baseline for a future
+-- note sync.
 function HighlightExporter:exportReaderBook(document_id, booknotes, metadata)
     local saved = self.history[document_id] or {}
     self.history[document_id] = saved
@@ -148,35 +148,13 @@ function HighlightExporter:exportReaderBook(document_id, booknotes, metadata)
 
     for _, entry in ipairs(passages) do
         local passage, notes = entry.text, entry.notes
-        local previous = saved[passage]
-        if previous and (previous.deleted or previous.notes == notes) then
-            -- Already exported with this note, or deleted in Reader
-            logger.dbg("HighlightExporter: passage unchanged in", document_id)
-        elseif previous and previous.id then
-            -- Editing a note must not create a second highlight. An empty
-            -- string explicitly removes a previously exported note.
-            local result, err, code = self.api:requestReader("PATCH", "/update/" .. previous.id .. "/",
-                { notes = notes })
-            if result then
-                record(passage, { id = previous.id, notes = notes })
-            elseif code == 404 then
-                -- Deleted in Reader since it was exported. Respect that rather
-                -- than recreating it, and stop retrying the update.
-                logger.warn("HighlightExporter: highlight", previous.id, "no longer exists in", document_id)
-                record(passage, { deleted = true, notes = notes })
-            else
-                failure = string.format("Could not update highlight note (%s).", tostring(code or err))
-                break
-            end
-        elseif previous then
-            -- Rejected by Reader earlier. The highlights API matches the existing
-            -- highlight by text, title, author and source URL, so this updates its note.
-            fallBack(entry)
+        if saved[passage] then
+            logger.dbg("HighlightExporter: passage already exported in", document_id)
         else
             local result, err, code, body = self.api:requestReader("POST", "/save/", {
                 parent_id = document_id,
                 content = passage,
-                -- create rejects a blank note with 400; only PATCH accepts "" (to clear)
+                -- create rejects a blank note with 400
                 notes = notes ~= "" and notes or nil,
                 saved_using = "koreader",
             })

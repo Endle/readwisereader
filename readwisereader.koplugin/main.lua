@@ -111,7 +111,7 @@ function ReadwiseReader:init()
     -- Initialize source URL metadata storage (for highlight export)
     self.document_source_urls = settings.document_source_urls or {}
 
-    -- Reader highlight IDs and last exported notes, keyed by document and passage.
+    -- Reader highlight IDs and the notes sent with them, keyed by document and passage.
     -- Keep these after cleanup so re-downloaded articles retain export history.
     self.reader_highlights = settings.reader_highlights or {}
 

@@ -199,48 +199,18 @@ test("successful exports survive restart and skip repeated syncs", function()
     eq(flushes, 1)
 end)
 
-test("note edits and removal update the saved highlight", function()
+test("notes changed after export are not sent", function()
     local reader = newReader()
     local notes = book({"Passage"})
-    replies = {
-        { code = 201, body = { id = "highlight-1" } },
-        { code = 200, body = { id = "highlight-1" } },
-        { code = 200, body = { id = "highlight-1" } },
-    }
+    replies = {{ code = 201, body = { id = "highlight-1" } }}
     assert(reader:createHighlights(notes))
     notes[1][1].note = "Edited note"
-    assert(reader:createHighlights(notes))
+    assert(newReader():createHighlights(notes))
     notes[1][1].note = nil
-    assert(reader:createHighlights(notes))
-    eq(http_calls[2].method, "PATCH")
-    eq(http_calls[2].url, "https://readwise.io/api/v3/update/highlight-1/")
-    eq(http_calls[2].body.notes, "Edited note")
-    eq(http_calls[3].body.notes, "")
-    eq(flushes, 3)
     assert(newReader():createHighlights(notes))
-    eq(#http_calls, 3)
-end)
-
-test("highlights deleted in Reader stop blocking sync and are not recreated", function()
-    local reader = newReader()
-    local notes = book({"Deleted", "Later"})
-    replies = {
-        { code = 201, body = { id = "highlight-1" } },
-        { code = 201, body = { id = "highlight-2" } },
-    }
-    assert(reader:createHighlights(notes))
-    notes[1][1].note = "Edited after deletion"
-    notes[2][1].note = "Edited too"
-    replies = {
-        { code = 404 },
-        { code = 200, body = { id = "highlight-2" } },
-    }
-    assert(newReader():createHighlights(notes))
-    eq(http_calls[4].url, "https://readwise.io/api/v3/update/highlight-2/")
-    eq(stored.readwisereader.reader_highlights["doc-1"].Deleted.deleted, true)
-    notes[1][1].note = "Edited again"
-    assert(newReader():createHighlights(notes))
-    eq(#http_calls, 4)
+    eq(#http_calls, 1)
+    eq(flushes, 1)
+    eq(stored.readwisereader.reader_highlights["doc-1"].Passage.notes, "My note")
 end)
 
 test("partial failure preserves progress and retries only unsent passages", function()
@@ -307,15 +277,11 @@ test("rejected passages fall back to the highlights API once", function()
     for _, line in ipairs(warnings) do assert(not line:find("Second", 1, true), line) end
     eq(stored.readwisereader.reader_highlights["doc-1"].Second.fallback, true)
     eq(flushes, 1)
-    -- Later syncs never offer the passage to Reader again; note edits are resent
-    -- through the highlights API, which updates the matching highlight.
+    -- Later syncs send the passage nowhere, even after a note edit.
+    assert(newReader():createHighlights(notes))
+    notes[2][1].note = "Edited note"
     assert(newReader():createHighlights(notes))
     eq(#http_calls, 4)
-    notes[2][1].note = "Edited note"
-    replies = {{ code = 200, body = {} }}
-    assert(newReader():createHighlights(notes))
-    eq(http_calls[5].url, "https://readwise.io/api/v2/highlights")
-    eq(http_calls[5].body.highlights[1].note, "Edited note")
 end)
 
 test("validation errors on plugin-chosen fields fail instead of falling back", function()
@@ -391,22 +357,6 @@ test("a failed fallback is not recorded", function()
     eq(http_calls[3].body.content, "Passage")
 end)
 
-test("failed note updates remain retryable", function()
-    local reader = newReader()
-    local notes = book({"Passage"})
-    replies = {
-        { code = 201, body = { id = "highlight-1" } },
-        { code = 500 },
-    }
-    assert(reader:createHighlights(notes))
-    notes[1][1].note = "New note"
-    eq(reader:createHighlights(notes), false)
-    eq(stored.readwisereader.reader_highlights["doc-1"].Passage.notes, "My note")
-    replies = {{ code = 200, body = { id = "highlight-1" } }}
-    assert(newReader():createHighlights(notes))
-    eq(http_calls[3].method, "PATCH")
-end)
-
 test("identical passages are scoped to their document", function()
     local reader = newReader()
     replies = {
@@ -433,7 +383,7 @@ test("repeated passages share one highlight with every note", function()
     eq(#http_calls, 2)
     eq(http_calls[1].body.content, "Same")
     eq(http_calls[1].body.notes, "First\n\nSecond")
-    -- Without merging, the copies overwrote each other's note on every sync.
+    -- Without merging, only the first copy's note would ever reach Reader.
     assert(newReader():createHighlights(notes))
     eq(#http_calls, 2)
 end)
