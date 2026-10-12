@@ -39,3 +39,6 @@ jobs:
 
       - name: Highlight export regression tests
         run: luajit tests/highlights_test.lua
+
+      - name: Reader cover regression tests
+        run: luajit tests/covers_test.lua

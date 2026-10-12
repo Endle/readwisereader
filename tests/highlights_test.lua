@@ -104,7 +104,7 @@ local unused = {
     "ui/bidi", "docsettings", "ui/event", "ffi/util", "apps/filemanager/filemanager",
     "ui/widget/inputdialog", "ui/widget/confirmbox", "ui/widget/multiconfirmbox",
     "readcollection", "ui/network/manager", "readhistory", "apps/filemanager/filemanagerutil",
-    "libs/libkoreader-lfs", "mime",
+    "libs/libkoreader-lfs", "mime", "ui/renderimage",
 }
 for _, name in ipairs(unused) do modules[name] = {} end
 for name, module in pairs(modules) do
@@ -535,6 +535,7 @@ test("failed export keeps local files and sync cursor but still downloads", func
             reader.reconcileLocalDocuments = forbidden
             reader.getDocumentList = function() return server_documents end
             reader.updateAvailableTags = noop
+            reader.localDocumentPaths = function() return {} end
             reader.documentExists = function() return false end
             reader.initCollectionTracking = noop
             reader.saveCollections = noop

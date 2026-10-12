@@ -7,6 +7,7 @@
 -- MAIN FEATURES:
 -- - Downloads articles from Readwise Reader "later" and "shortlist" locations
 -- - Converts articles to HTML format with embedded images
+-- - Optionally uses each article's Reader image as its KOReader cover
 -- - Generates KOReader metadata sidecars (.sdr) for enhanced library integration
 -- - Automatically manages KOReader collections based on article location
 -- - Offers filtering by article tags, location, type and site name (via series)
@@ -25,6 +26,7 @@ local logger = require("logger")
 -- file, so plugin modules must be required here, never lazily inside a function.
 local ReadwiseAPI = require("readwisereader/api")
 local HighlightExporter = require("readwisereader/highlights")
+local ReaderCovers = require("readwisereader/covers")
 
 local BD = require("ui/bidi")
 local DataStorage = require("datastorage")
@@ -118,6 +120,15 @@ function ReadwiseReader:init()
     -- Initialize image download settings
     self.download_images = settings.download_images == nil and true or settings.download_images
     self.max_image_size_mb = settings.max_image_size_mb or 10
+
+    -- Reader images as KOReader custom covers, off by default.
+    self.download_covers = settings.download_covers or false
+    -- Ids of articles whose cover was never tried, and of those that failed for a
+    -- reason that may pass. Successes and permanent failures are not recorded, so
+    -- a cover the user removed stays removed. covers_pending is nil until the first
+    -- sync with covers on fills it with the articles already on the device.
+    self.covers_pending = settings.covers_pending
+    self.covers_failed = settings.covers_failed or {}
 
     -- Initialize max articles download limit
     self.max_articles_to_download = settings.max_articles_to_download or 0 -- 0 = unlimited
@@ -703,6 +714,35 @@ function ReadwiseReader:addToMainMenu(menu_items)
                                 keep_menu_open = true,
                                 callback = function()
                                     self:showImageSizeDialog()
+                                end,
+                            },
+                            {
+                                text = "Download article covers",
+                                help_text = "Use each article's Reader image as its cover. Articles already on this device get theirs over the next few syncs.",
+                                checked_func = function()
+                                    return self.download_covers
+                                end,
+                                callback = function()
+                                    self.download_covers = not self.download_covers
+                                    -- Start over either way: turning covers on gives every
+                                    -- article without one an attempt, and off stores nothing.
+                                    self.covers_pending = nil
+                                    self.covers_failed = {}
+                                    self:saveSettings()
+                                end,
+                            },
+                            {
+                                text_func = function()
+                                    return string.format("Retry failed covers (%d)", util.tableSize(self.covers_failed))
+                                end,
+                                enabled_func = function()
+                                    return self.download_covers and next(self.covers_failed) ~= nil
+                                end,
+                                callback = function()
+                                    local count = self:retryFailedCovers()
+                                    UIManager:show(InfoMessage:new{
+                                        text = string.format("%d cover(s) will be retried at the next sync.", count),
+                                    })
                                 end,
                             },
                         }
@@ -1552,12 +1592,121 @@ function ReadwiseReader:documentExists(doc_id)
     return self:findLocalDocumentByReadwiseId(doc_id) ~= nil
 end
 
-function ReadwiseReader:downloadDocument(document)
+function ReadwiseReader:localDocumentPaths()
+    local paths = {}
+    self:forEachLocalDocument(function(doc_id, filepath)
+        paths[doc_id] = filepath
+    end)
+    return paths
+end
+
+-- ===============================================================================
+-- READER COVERS
+-- ===============================================================================
+-- New articles try their cover once, at download. Articles that were already on
+-- the device when covers were turned on wait in covers_pending and get theirs
+-- within a time budget per sync. Nothing is retried automatically.
+
+-- Seconds per sync for covers of earlier articles. One download may run over it.
+local COVER_BUDGET_SECONDS = 30
+-- Network errors in a row after which this sync stops downloading covers.
+local COVER_OFFLINE_AFTER = 3
+
+-- Per-sync cover state, or nil when covers are off.
+function ReadwiseReader:startCoverSync(documents, local_paths)
+    if not self.download_covers then
+        return nil
+    end
+    if not self.covers_pending then
+        -- First sync with covers on: every article already here gets one attempt.
+        self.covers_pending = {}
+        for _, document in ipairs(documents) do
+            local filepath = local_paths[document.id]
+            if filepath and ReaderCovers.isFetchable(document.image_url)
+                    and not DocSettings:findCustomCoverFile(filepath) then
+                self.covers_pending[document.id] = true
+            end
+        end
+    end
+    -- Forget articles that are no longer on the device.
+    for _, ids in ipairs({ self.covers_pending, self.covers_failed }) do
+        for doc_id in pairs(ids) do
+            if not local_paths[doc_id] then
+                ids[doc_id] = nil
+            end
+        end
+    end
+    return { added = 0, failed = 0, network_errors = 0 }
+end
+
+-- One attempt. Only failures that may pass are remembered, for the manual retry.
+function ReadwiseReader:downloadCover(filepath, document, cover_run)
+    if cover_run.network_errors >= COVER_OFFLINE_AFTER then
+        -- Not attempted, so it waits for a later sync.
+        self.covers_pending[document.id] = true
+        return
+    end
+    self.covers_pending[document.id] = nil
+    local status = ReaderCovers:sync(filepath, document.image_url)
+    if status == "offline" then
+        cover_run.network_errors = cover_run.network_errors + 1
+    elseif status ~= "exists" then
+        cover_run.network_errors = 0
+    end
+    if status == "installed" then
+        cover_run.added = cover_run.added + 1
+    elseif status == "temporary" or status == "offline" then
+        self.covers_failed[document.id] = true
+        cover_run.failed = cover_run.failed + 1
+    end
+end
+
+-- Earlier articles, in document list order. An open article is skipped and keeps
+-- its place, so the reader's cached settings never miss a new cover.
+function ReadwiseReader:fillPendingCovers(documents, local_paths, cover_run)
+    local started = os.time()
+    for _, document in ipairs(documents) do
+        if cover_run.network_errors >= COVER_OFFLINE_AFTER
+                or os.time() - started >= COVER_BUDGET_SECONDS then
+            break
+        end
+        local filepath = local_paths[document.id]
+        if self.covers_pending[document.id] and filepath and not self:isOpenDocument(filepath) then
+            if ReaderCovers.isFetchable(document.image_url) then
+                self:showProgress(string.format("Adding cover: %s", document.title or "Untitled"))
+                self:downloadCover(filepath, document, cover_run)
+            else
+                self.covers_pending[document.id] = nil
+            end
+        end
+    end
+end
+
+function ReadwiseReader:isOpenDocument(filepath)
+    return self.ui and self.ui.document and self.ui.document.file == filepath or false
+end
+
+function ReadwiseReader:retryFailedCovers()
+    local count = 0
+    for doc_id in pairs(self.covers_failed) do
+        -- Without a pending list, the next sync builds one that includes these.
+        if self.covers_pending then
+            self.covers_pending[doc_id] = true
+        end
+        count = count + 1
+    end
+    self.covers_failed = {}
+    self:saveSettings()
+    return count
+end
+
+-- cover_run is the sync's cover state, nil when covers are off.
+function ReadwiseReader:downloadDocument(document, cover_run)
     if self:shouldSkipDocument(document) then
         logger.dbg("ReadwiseReader:downloadDocument: skipping", document.id, "- has excluded tags or location")
         return "skipped"
     end
-    
+
     if self:documentExists(document.id) then
         logger.dbg("ReadwiseReader:downloadDocument: skipping", document.id, "- already exists")
         return "skipped"
@@ -1614,6 +1763,10 @@ function ReadwiseReader:downloadDocument(document)
         local status, err = pcall(function() self:setDocumentMetadata(filepath, document) end)
         if not status then
             logger.warn("ReadwiseReader:downloadDocument: metadata writing failed:", err)
+        end
+
+        if cover_run and ReaderCovers.isFetchable(document.image_url) then
+            self:downloadCover(filepath, document, cover_run)
         end
 
         -- Update KOReader collections
@@ -2168,18 +2321,24 @@ function ReadwiseReader:synchronize()
     local reconciled_count = keep_local and 0 or self:reconcileLocalDocuments(documents)
     self:hideProgress()
 
+    -- One directory scan, after reconciliation has removed files.
+    local local_paths = self:localDocumentPaths()
+    local cover_run = self:startCoverSync(documents, local_paths)
+
     local filtered_documents = {}
     local existing_count = 0
+    local covers_pending = false
 
     for _, document in ipairs(documents) do
-        if self:documentExists(document.id) then
+        if local_paths[document.id] then
             existing_count = existing_count + 1
+            covers_pending = covers_pending or (cover_run and self.covers_pending[document.id]) or false
         else
             table.insert(filtered_documents, document)
         end
     end
 
-    if #filtered_documents == 0 and cleaned_count == 0 and archived_count == 0 and highlights_exported == 0 and reconciled_count == 0 then
+    if #filtered_documents == 0 and not covers_pending and cleaned_count == 0 and archived_count == 0 and highlights_exported == 0 and reconciled_count == 0 then
         local msg = "No new articles found and no changes to process."
         if existing_count > 0 then
             msg = msg .. "\n" .. string.format("Skipped %d existing articles.", existing_count)
@@ -2204,7 +2363,7 @@ function ReadwiseReader:synchronize()
     for i, document in ipairs(filtered_documents) do
         self:showProgress(string.format("Downloading %d of %d: %s", i, #filtered_documents, document.title))
 
-        local result = self:downloadDocument(document)
+        local result = self:downloadDocument(document, cover_run)
 
         if result == "downloaded" then
             downloaded = downloaded + 1
@@ -2223,6 +2382,10 @@ function ReadwiseReader:synchronize()
     -- Final save for any remaining collection changes
     self:saveCollections()
 
+    if cover_run then
+        self:fillPendingCovers(documents, local_paths, cover_run)
+    end
+
     self:hideProgress()
     
     if not keep_local then
@@ -2240,6 +2403,14 @@ function ReadwiseReader:synchronize()
         msg = msg .. "\n" .. string.format("Downloaded: %d", downloaded)
     end
     
+    if cover_run and cover_run.added > 0 then
+        msg = msg .. "\n" .. string.format("Covers added: %d", cover_run.added)
+    end
+
+    if cover_run and cover_run.failed > 0 then
+        msg = msg .. "\n" .. string.format("Covers failed: %d (retry in Image Download settings)", cover_run.failed)
+    end
+
     if existing_count > 0 then
         msg = msg .. "\n" .. string.format("Skipped (already exists): %d", existing_count)
     end
@@ -2302,6 +2473,10 @@ function ReadwiseReader:saveSettings()
         reader_highlights = self.reader_highlights,
         download_images = self.download_images,
         max_image_size_mb = self.max_image_size_mb,
+        download_covers = self.download_covers,
+        -- An empty pending list is kept: it means earlier articles are done.
+        covers_pending = self.covers_pending,
+        covers_failed = next(self.covers_failed or {}) and self.covers_failed or nil,
         max_articles_to_download = self.max_articles_to_download,
         sync_only_koreader_tag = self.sync_only_koreader_tag,
     }
