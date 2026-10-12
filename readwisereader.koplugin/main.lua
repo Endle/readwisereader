@@ -779,7 +779,7 @@ function ReadwiseReader:addToMainMenu(menu_items)
                 }
             },
             {
-                text = "Version 2.5",
+                text = "Version 2.6",
                 enabled = false,
             },
         },
