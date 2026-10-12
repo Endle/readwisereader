@@ -273,6 +273,7 @@ test("rejected passages fall back to the highlights API once", function()
     eq(highlight.source_url, "https://example.com/article")
     contains(errors[#errors], "content not found")
     contains(warnings[#warnings], "rejected")
+    contains(warnings[#warnings], "page 4")
     -- Highlight text is private; it is only logged at debug level.
     for _, line in ipairs(warnings) do assert(not line:find("Second", 1, true), line) end
     eq(stored.readwisereader.reader_highlights["doc-1"].Second.fallback, true)
@@ -422,14 +423,20 @@ test("books without stored metadata fall back to the parsed author", function()
     eq(#http_calls, 2)
 end)
 
-test("highlights API failures are returned to the caller", function()
+test("highlights API failures are returned to the caller and logged", function()
+    local errors = captureLog("err")
     local reader = newReader()
-    for _, reply in ipairs({{ code = 500 }, { code = 200 }}) do
+    for _, reply in ipairs({{ code = 500, raw = "server exploded" }, { code = 200 }}) do
         replies = {reply}
-        local ok, err = reader:createHighlights(book({"Passage"}))
+        local notes = book({"Passage"})
+        notes.file = "/books/book.epub"
+        local ok, err = reader:createHighlights(notes)
         eq(ok, false)
         assert(err)
     end
+    require("logger").err = noop
+    eq(http_calls[1].url, "https://readwise.io/api/v2/highlights")
+    contains(errors[1], "server exploded")
 end)
 
 test("429 retries rebuild the consumed request body", function()

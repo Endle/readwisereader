@@ -211,6 +211,9 @@ function ReadwiseAPI:createReadwiseHighlights(highlights)
     socketutil:reset_timeout()
 
     if code ~= 200 then
+        -- as in requestReader: the body explains the failure, and only its start is logged
+        logger.err("ReadwiseAPI:createReadwiseHighlights: request failed", code, status,
+            table.concat(sink):sub(1, 500))
         return nil, "Request failed: " .. (status or code or "network unreachable")
     end
 

@@ -166,8 +166,10 @@ function HighlightExporter:exportReaderBook(document_id, booknotes, metadata)
                 record(passage, { id = result.id, notes = notes })
             elseif rejectsPassage(code, body) then
                 -- requestReader already logged Reader's explanation. Highlight
-                -- text stays out of warnings, which users attach to public issues.
-                logger.warn("HighlightExporter: Reader rejected a passage in", document_id, "with", code)
+                -- text stays out of warnings, which users attach to public issues;
+                -- the page identifies the highlight, since it is not sent again.
+                logger.warn("HighlightExporter: Reader rejected a passage on page", entry.clipping.page,
+                    "in", document_id, "with", code)
                 logger.dbg("HighlightExporter: rejected passage:", passage)
                 fallBack(entry)
             else
