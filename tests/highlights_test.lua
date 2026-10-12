@@ -145,24 +145,267 @@ local function test(name, run)
     print("ok - " .. name)
 end
 
-test("highlights export through the Readwise highlights API", function()
+test("Reader payload preserves text and accepts 201", function()
+    local reader = newReader()
+    local text = "A ‘quote’ & punctuation.\nA second paragraph."
+    replies = {{ code = 201, body = { id = "highlight-1" } }}
+    assert(reader:createHighlights(book({text})))
+    eq(#http_calls, 1)
+    local request = http_calls[1]
+    eq(request.url, "https://readwise.io/api/v3/save/")
+    eq(request.method, "POST")
+    eq(request.headers.Authorization, "Token test-token")
+    eq(request.body.parent_id, "doc-1")
+    eq(request.body.content, text)
+    eq(request.body.notes, "My note")
+    eq(request.body.saved_using, "koreader")
+    eq(request.body.url, nil)
+    eq(request.body.location, nil)
+    eq(flushes, 1)
+    eq(stored.readwisereader.reader_highlights["doc-1"][text].id, "highlight-1")
+end)
+
+test("highlights without a note omit notes when created", function()
+    local reader = newReader()
+    local notes = book({"Passage"})
+    notes[1][1].note = nil
+    replies = {{ code = 201, body = { id = "highlight-1" } }}
+    assert(reader:createHighlights(notes))
+    eq(http_calls[1].body.notes, nil)
+    eq(stored.readwisereader.reader_highlights["doc-1"].Passage.notes, "")
+end)
+
+test("whitespace-only notes count as blank", function()
+    -- Reader trims notes, so " " would be rejected as blank (400) like "".
+    local reader = newReader()
+    local notes = book({"Passage"})
+    notes[1][1].note = " \n"
+    replies = {{ code = 201, body = { id = "highlight-1" } }}
+    assert(reader:createHighlights(notes))
+    eq(http_calls[1].body.notes, nil)
+    eq(stored.readwisereader.reader_highlights["doc-1"].Passage.notes, "")
+    notes[1][1].note = nil
+    assert(newReader():createHighlights(notes))
+    eq(#http_calls, 1)
+end)
+
+test("successful exports survive restart and skip repeated syncs", function()
+    local reader = newReader()
+    replies = {{ code = 200, body = { id = "highlight-1" } }}
+    assert(reader:createHighlights(book({"Passage"})))
+    local restarted = newReader()
+    assert(restarted:createHighlights(book({"Passage"})))
+    eq(#http_calls, 1)
+    eq(flushes, 1)
+end)
+
+test("notes changed after export are not sent", function()
+    local reader = newReader()
+    local notes = book({"Passage"})
+    replies = {{ code = 201, body = { id = "highlight-1" } }}
+    assert(reader:createHighlights(notes))
+    notes[1][1].note = "Edited note"
+    assert(newReader():createHighlights(notes))
+    notes[1][1].note = nil
+    assert(newReader():createHighlights(notes))
+    eq(#http_calls, 1)
+    eq(flushes, 1)
+    eq(stored.readwisereader.reader_highlights["doc-1"].Passage.notes, "My note")
+end)
+
+test("partial failure preserves progress and retries only unsent passages", function()
+    local reader = newReader()
+    replies = {
+        { code = 201, body = { id = "highlight-1" } },
+        { code = 201, body = { id = "highlight-2" } },
+        { code = 500 },
+    }
+    local notes = book({"First", "Second", "Third", "Fourth"})
+    local ok, err = reader:createHighlights(notes)
+    eq(ok, false)
+    contains(err, "500")
+    eq(#http_calls, 3)
+    -- History is saved once per book, including when the book fails.
+    eq(flushes, 1)
+    eq(stored.readwisereader.reader_highlights["doc-1"].Second.id, "highlight-2")
+    eq(stored.readwisereader.reader_highlights["doc-1"].Third, nil)
+    replies = {
+        { code = 201, body = { id = "highlight-3" } },
+        { code = 201, body = { id = "highlight-4" } },
+    }
+    assert(newReader():createHighlights(notes))
+    eq(#http_calls, 5)
+    eq(http_calls[4].body.content, "Third")
+end)
+
+local function captureLog(level)
+    local lines = {}
+    require("logger")[level] = function(...)
+        local parts = {}
+        for i = 1, select("#", ...) do parts[i] = tostring((select(i, ...))) end
+        lines[#lines + 1] = table.concat(parts, " ")
+    end
+    return lines
+end
+
+test("rejected passages fall back to the highlights API once", function()
+    local errors, warnings = captureLog("err"), captureLog("warn")
+    local logger = require("logger")
     local reader = newReader()
     reader.document_authors = { ["doc-1"] = "Stored Author" }
     reader.document_source_urls = { ["doc-1"] = "https://example.com/article" }
-    replies = {{ code = 200, body = {} }}
-    assert(reader:createHighlights(book({"Passage"})))
-    local request = http_calls[1]
-    eq(request.url, "https://readwise.io/api/v2/highlights")
-    eq(request.method, "POST")
-    eq(request.headers.Authorization, "Token test-token")
-    local highlight = request.body.highlights[1]
-    eq(highlight.text, "Passage")
-    eq(highlight.title, "Article")
+    local notes = book({"First", "Second", "Third"})
+    replies = {
+        { code = 201, body = { id = "highlight-1" } },
+        { code = 400, raw = "content not found" },
+        { code = 201, body = { id = "highlight-3" } },
+        { code = 200, body = {} },
+    }
+    local ok = reader:createHighlights(notes)
+    logger.err, logger.warn = noop, noop
+    assert(ok)
+    eq(http_calls[4].url, "https://readwise.io/api/v2/highlights")
+    eq(#http_calls[4].body.highlights, 1)
+    local highlight = http_calls[4].body.highlights[1]
+    eq(highlight.text, "Second")
+    eq(highlight.note, "My note")
     eq(highlight.author, "Stored Author")
     eq(highlight.source_url, "https://example.com/article")
-    eq(highlight.note, "My note")
-    eq(highlight.location, 4)
-    eq(highlight.category, "articles")
+    contains(errors[#errors], "content not found")
+    contains(warnings[#warnings], "rejected")
+    contains(warnings[#warnings], "page 4")
+    -- Highlight text is private; it is only logged at debug level.
+    for _, line in ipairs(warnings) do assert(not line:find("Second", 1, true), line) end
+    eq(stored.readwisereader.reader_highlights["doc-1"].Second.fallback, true)
+    eq(flushes, 1)
+    -- Later syncs send the passage nowhere, even after a note edit.
+    assert(newReader():createHighlights(notes))
+    notes[2][1].note = "Edited note"
+    assert(newReader():createHighlights(notes))
+    eq(#http_calls, 4)
+end)
+
+test("validation errors on plugin-chosen fields fail instead of falling back", function()
+    -- e.g. the blank-notes 400: falling back would hide the bug and skip Reader
+    -- for that passage forever.
+    local reader = newReader()
+    replies = {{ code = 400, raw = '{"notes": ["This field may not be blank."]}' }}
+    local ok, err = reader:createHighlights(book({"Passage"}))
+    eq(ok, false)
+    contains(err, "400")
+    eq(#http_calls, 1)
+    eq(stored.readwisereader.reader_highlights, nil)
+    replies = {{ code = 201, body = { id = "highlight-1" } }}
+    assert(newReader():createHighlights(book({"Passage"})))
+    eq(http_calls[2].url, "https://readwise.io/api/v3/save/")
+end)
+
+test("400s about the passage or its parent still fall back", function()
+    for _, body in ipairs({
+        '{"content": ["Not found in the document."]}',
+        '{"parent_id": ["Invalid parent."], "notes": ["Ensure this field has no more than 8191 characters."]}',
+    }) do
+        local reader = newReader()
+        replies = {
+            { code = 400, raw = body },
+            { code = 200, body = {} },
+        }
+        assert(reader:createHighlights(book({"Passage"})))
+        eq(http_calls[#http_calls].url, "https://readwise.io/api/v2/highlights")
+    end
+end)
+
+test("deleted parent documents fall back instead of blocking sync", function()
+    local reader = newReader()
+    replies = {
+        { code = 404 },
+        { code = 200, body = {} },
+    }
+    assert(reader:createHighlights(book({"Passage"})))
+    eq(http_calls[2].url, "https://readwise.io/api/v2/highlights")
+end)
+
+test("rejected passages are sent even when a later passage fails", function()
+    local reader = newReader()
+    local notes = book({"First", "Second"})
+    replies = {
+        { code = 400 },
+        { code = 500 },
+        { code = 200, body = {} },
+    }
+    local ok, err = reader:createHighlights(notes)
+    eq(ok, false)
+    contains(err, "500")
+    eq(http_calls[3].body.highlights[1].text, "First")
+    eq(stored.readwisereader.reader_highlights["doc-1"].First.fallback, true)
+end)
+
+test("a failed fallback is not recorded", function()
+    local reader = newReader()
+    replies = {
+        { code = 400 },
+        { code = 500 },
+    }
+    local ok, err = reader:createHighlights(book({"Passage"}))
+    eq(ok, false)
+    contains(err, "highlights API failed")
+    eq(flushes, 0)
+    replies = {
+        { code = 400 },
+        { code = 200, body = {} },
+    }
+    assert(newReader():createHighlights(book({"Passage"})))
+    eq(http_calls[3].body.content, "Passage")
+end)
+
+test("identical passages are scoped to their document", function()
+    local reader = newReader()
+    replies = {
+        { code = 201, body = { id = "highlight-1" } },
+        { code = 201, body = { id = "highlight-2" } },
+    }
+    assert(reader:createHighlights(book({"Same", "Same"})))
+    assert(reader:createHighlights(book({"Same"}, "doc-2")))
+    eq(#http_calls, 2)
+    eq(http_calls[2].body.parent_id, "doc-2")
+end)
+
+test("repeated passages share one highlight with every note", function()
+    local reader = newReader()
+    local notes = book({"Same", "Other", "Same", "Same"})
+    notes[1][1].note = "First"
+    notes[3][1].note = nil
+    notes[4][1].note = "Second"
+    replies = {
+        { code = 201, body = { id = "highlight-1" } },
+        { code = 201, body = { id = "highlight-2" } },
+    }
+    assert(reader:createHighlights(notes))
+    eq(#http_calls, 2)
+    eq(http_calls[1].body.content, "Same")
+    eq(http_calls[1].body.notes, "First\n\nSecond")
+    -- Without merging, only the first copy's note would ever reach Reader.
+    assert(newReader():createHighlights(notes))
+    eq(#http_calls, 2)
+end)
+
+test("non-Reader books and clippings without files keep legacy export", function()
+    local reader = newReader()
+    for _, file in ipairs({"/books/book.epub", false}) do
+        local notes = book({"Passage"})
+        notes.file = file or nil
+        notes.author = "An Author"
+        replies = {{ code = 200, body = {} }}
+        assert(reader:createHighlights(notes))
+        local request = http_calls[#http_calls]
+        eq(request.url, "https://readwise.io/api/v2/highlights")
+        eq(request.method, "POST")
+        eq(request.body.highlights[1].text, "Passage")
+        eq(request.body.highlights[1].author, "An Author")
+        eq(request.body.highlights[1].note, "My note")
+        eq(request.headers.Authorization, "Token test-token")
+    end
+    eq(#http_calls, 2)
 end)
 
 test("books without stored metadata fall back to the parsed author", function()
@@ -180,36 +423,76 @@ test("books without stored metadata fall back to the parsed author", function()
     eq(#http_calls, 2)
 end)
 
-test("highlights API failures are returned to the caller", function()
+test("highlights API failures are returned to the caller and logged", function()
+    local errors = captureLog("err")
     local reader = newReader()
-    for _, reply in ipairs({{ code = 500 }, { code = 200 }}) do
+    for _, reply in ipairs({{ code = 500, raw = "server exploded" }, { code = 200 }}) do
         replies = {reply}
-        local ok, err = reader:createHighlights(book({"Passage"}))
+        local notes = book({"Passage"})
+        notes.file = "/books/book.epub"
+        local ok, err = reader:createHighlights(notes)
         eq(ok, false)
         assert(err)
     end
+    require("logger").err = noop
+    eq(http_calls[1].url, "https://readwise.io/api/v2/highlights")
+    contains(errors[1], "server exploded")
 end)
 
 test("429 retries rebuild the consumed request body", function()
     local reader = newReader()
     replies = {
         { code = 429, headers = { ["retry-after"] = "2" } },
-        { code = 200, body = { id = "doc-1" } },
+        { code = 201, body = { id = "highlight-1" } },
     }
-    assert(reader:callAPI("PATCH", "/update/doc-1/", { location = "archive" }))
+    assert(reader:createHighlights(book({"Passage"})))
     eq(#http_calls, 2)
-    eq(http_calls[2].body.location, "archive")
+    eq(http_calls[2].body.content, "Passage")
     eq(sleeps[1], 2)
+    eq(flushes, 1)
 end)
 
-test("rate-limit retries are bounded", function()
+test("rate-limit retries are bounded and do not mark success", function()
     local reader = newReader()
     for _ = 1, 3 do replies[#replies + 1] = { code = 429, headers = { ["retry-after"] = "1" } } end
-    local result, err, code = reader.api:requestReader("GET", "/list/")
-    eq(result, nil)
-    eq(err, "http_error")
-    eq(code, 429)
+    local ok, err = reader:createHighlights(book({"Passage"}))
+    eq(ok, false)
+    contains(err, "429")
     eq(#http_calls, 3)
+    eq(flushes, 0)
+end)
+
+test("ambiguous create failures are not automatically retried", function()
+    local reader = newReader()
+    replies = {{ network_error = "wantread" }}
+    eq(reader:createHighlights(book({"Passage"})), false)
+    eq(#http_calls, 1)
+    eq(flushes, 0)
+end)
+
+test("malformed responses and missing IDs are not recorded as success", function()
+    local reader = newReader()
+    for _, reply in ipairs({
+        { code = 201, raw = "not-json" },
+        { code = 201, body = {} },
+        { code = 201 },
+        { code = 401 },
+    }) do
+        replies = {reply}
+        eq(reader:createHighlights(book({"Passage"})), false)
+        eq(flushes, 0)
+    end
+end)
+
+test("empty/image-only highlights are skipped without blocking the book", function()
+    local reader = newReader()
+    assert(reader:createHighlights(book({"  \n"})))
+    local notes = book({"Image", "Passage"})
+    notes[1][1].text = nil
+    replies = {{ code = 201, body = { id = "highlight-1" } }}
+    assert(reader:createHighlights(notes))
+    eq(#http_calls, 1)
+    eq(http_calls[1].body.content, "Passage")
 end)
 
 test("book export errors reach the caller, including partial success", function()
@@ -319,6 +602,18 @@ test("transport retries safe reads and strips nested JSON nulls", function()
 end)
 
 
+test("large error bodies are returned whole but logged truncated", function()
+    local errors = captureLog("err")
+    local reader = newReader()
+    local page = "<html>" .. string.rep("x", 5000) .. "</html>"
+    replies = {{ code = 400, raw = page }}
+    local _, _, code, body = reader.api:requestReader("POST", "/save/", {})
+    require("logger").err = noop
+    eq(code, 400)
+    eq(body, page)
+    assert(#errors[1] < 600, #errors[1])
+end)
+
 test("only the plugin presents interactive API errors", function()
     local reader = newReader()
     replies = {
@@ -359,22 +654,6 @@ test("rate-limit sessions reset independently for each client", function()
     eq(reader.api.api_call_count, 0)
     eq(reader.api.sync_start_time, nil)
     eq(reader.api.needs_rate_limiting, false)
-end)
-
-test("Reader requests accept 201 Created", function()
-    local reader = newReader()
-    replies = {{ code = 201, body = { id = "created-1" } }}
-    local result = reader:callAPI("POST", "/save/", { url = "https://example.com" })
-    eq(result.id, "created-1")
-end)
-
-test("ambiguous POST failures are not automatically retried", function()
-    local reader = newReader()
-    replies = {{ network_error = "wantread" }}
-    local result, err = reader:callAPI("POST", "/save/", { url = "https://example.com" }, true)
-    eq(result, nil)
-    eq(err, "network_error")
-    eq(#http_calls, 1)
 end)
 
 print(string.format("%d tests passed", passed))
