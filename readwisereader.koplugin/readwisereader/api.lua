@@ -175,8 +175,11 @@ function ReadwiseAPI:requestReader(method, endpoint, body)
             return true
         end
     else
-        logger.err("ReadwiseAPI:requestReader: HTTP error", code, status)
-        return nil, "http_error", code
+        -- the body is Reader's explanation, e.g. why /save/ rejected a highlight.
+        -- Proxies can answer with a whole HTML page, so only its start is logged.
+        local error_body = table.concat(sink)
+        logger.err("ReadwiseAPI:requestReader: HTTP error", code, status, error_body:sub(1, 500))
+        return nil, "http_error", code, error_body
     end
 end
 
@@ -208,6 +211,9 @@ function ReadwiseAPI:createReadwiseHighlights(highlights)
     socketutil:reset_timeout()
 
     if code ~= 200 then
+        -- as in requestReader: the body explains the failure, and only its start is logged
+        logger.err("ReadwiseAPI:createReadwiseHighlights: request failed", code, status,
+            table.concat(sink):sub(1, 500))
         return nil, "Request failed: " .. (status or code or "network unreachable")
     end
 
