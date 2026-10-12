@@ -4,7 +4,7 @@ A plugin for KOReader integration with the highlight saving and read later servi
 ## Key features:
 - Articles in Readwise Reader saved to “Inbox”, “Later” or “Shortlist” are downloaded to KOReader as HTML files.
 - Images are downloaded where this is possible.
-- Reader cover images are downloaded as KOReader custom covers when image downloads are enabled. Sync also adds missing covers to previously downloaded articles without rewriting their HTML. Existing custom covers, including manually chosen ones, are preserved. Missing, unsupported or unavailable images leave the cover unchanged.
+- Optionally, each article's Reader image becomes its KOReader cover (off by default - enable "Download article covers" in Settings/Image Download). New articles get their cover when downloaded; articles already on the device get theirs over the next few syncs, for about 30 seconds per sync. The article HTML is not rewritten. Existing custom covers, including manually chosen ones, are kept, and a cover you remove is not downloaded again. Images over 2MB, under 200 pixels on a side or over 4 million pixels are skipped. Failed downloads are not retried automatically: use "Retry failed covers" in the same menu.
 - Articles which have been read in KOReader and marked as “finished” will be moved to the Readwise Reader Archive at the next sync, and deleted from KOReader.
 - At sync, articles which have been archived in Readwise Reader will be deleted from KOReader.
 - Particular types of article, locations and document tags can be excluded from syncing in the settings menu.
