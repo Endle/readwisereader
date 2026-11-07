@@ -533,7 +533,7 @@ test("failed export keeps local files and sync cursor but still downloads", func
             reader.cleanupArchivedDocuments = forbidden
             reader.processFinishedDocuments = forbidden
             reader.reconcileLocalDocuments = forbidden
-            reader.getDocumentList = function() return server_documents end
+            reader.getDocumentList = function() return server_documents, 0 end
             reader.updateAvailableTags = noop
             reader.localDocumentPaths = function() return {} end
             reader.documentExists = function() return false end

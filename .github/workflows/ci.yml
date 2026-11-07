@@ -42,3 +42,6 @@ jobs:
 
       - name: Reader cover regression tests
         run: luajit tests/covers_test.lua
+
+      - name: Deleted article regression tests
+        run: luajit tests/deleted_articles_test.lua

@@ -113,6 +113,11 @@ function ReadwiseReader:init()
     -- Initialize source URL metadata storage (for highlight export)
     self.document_source_urls = settings.document_source_urls or {}
 
+    -- Ids of articles that have been on this device. An article the server lists
+    -- that is recorded here but has no local file was deleted by the user, so sync
+    -- does not download it again.
+    self.downloaded_documents = settings.downloaded_documents or {}
+
     -- Reader highlight IDs and the notes sent with them, keyed by document and passage.
     -- Keep these after cleanup so re-downloaded articles retain export history.
     self.reader_highlights = settings.reader_highlights or {}
@@ -231,6 +236,29 @@ function ReadwiseReader:removeSourceUrlMetadata(document_id)
     if self.document_source_urls and self.document_source_urls[document_id] then
         self.document_source_urls[document_id] = nil
         logger.dbg("ReadwiseReader:removeSourceUrlMetadata: removed source_url metadata for document", document_id)
+        self:saveSettings()
+    end
+end
+
+-- ===============================================================================
+-- DOWNLOAD RECORD
+-- ===============================================================================
+
+-- Records every article on disk and returns them. This is what fills the record
+-- after an upgrade, a folder change or "Re-download deleted articles".
+function ReadwiseReader:recordLocalDocuments()
+    local local_paths = self:localDocumentPaths()
+    for doc_id in pairs(local_paths) do
+        self.downloaded_documents[doc_id] = true
+    end
+    return local_paths
+end
+
+-- For files the plugin removes itself: the article may download again if the server
+-- lists it later, because the user did not delete it.
+function ReadwiseReader:removeDownloadRecord(document_id)
+    if self.downloaded_documents[document_id] then
+        self.downloaded_documents[document_id] = nil
         self:saveSettings()
     end
 end
@@ -647,6 +675,18 @@ function ReadwiseReader:addToMainMenu(menu_items)
                                     end,
                                 })
                             end)
+                        end,
+                    },
+                    {
+                        text = "Re-download deleted articles",
+                        help_text = "Articles you deleted on this device are downloaded again at the next sync, if they are still in Readwise Reader.",
+                        callback = function()
+                            self.downloaded_documents = {}
+                            self:saveSettings()
+                            UIManager:show(InfoMessage:new{
+                                text = "Articles you deleted on this device will be downloaded at the next sync.",
+                                timeout = 3
+                            })
                         end,
                     },
                 },
@@ -1294,6 +1334,8 @@ function ReadwiseReader:setDownloadDirectory(touchmenu_instance)
     require("ui/downloadmgr"):new{
         onConfirm = function(path)
             self.directory = path
+            -- Articles missing from a new folder were not deleted by the user.
+            self.downloaded_documents = {}
             self:saveSettings()
             if touchmenu_instance then
                 touchmenu_instance:updateItems()
@@ -1358,10 +1400,14 @@ function ReadwiseReader:callAPI(method, endpoint, body, quiet)
     return result, err, code
 end
 
+-- Returns the articles to keep on this device, nil on failure, and how many
+-- were left out because the user deleted them.
 function ReadwiseReader:getDocumentList()
     local documents = {}
+    local deleted_on_device = 0
+    local local_paths = self:recordLocalDocuments()
     local next_cursor = nil
-    
+
     local locations = {"new", "later", "shortlist"}
     
     for _, location in ipairs(locations) do
@@ -1410,13 +1456,19 @@ function ReadwiseReader:getDocumentList()
                         if doc.reading_progress < 1 then
                             -- Apply tag/location filtering during collection
                             if not self:shouldSkipDocument(doc) then
-                                table.insert(documents, doc)
+                                -- Checked before the limit, so that deleted articles
+                                -- do not take the places of ones still to download.
+                                if self.downloaded_documents[doc.id] and not local_paths[doc.id] then
+                                    deleted_on_device = deleted_on_device + 1
+                                else
+                                    table.insert(documents, doc)
 
-                                -- Check if limit reached
-                                if self.max_articles_to_download > 0 and
-                                   #documents >= self.max_articles_to_download then
-                                    limit_reached = true
-                                    break
+                                    -- Check if limit reached
+                                    if self.max_articles_to_download > 0 and
+                                       #documents >= self.max_articles_to_download then
+                                        limit_reached = true
+                                        break
+                                    end
                                 end
                             end
                         end
@@ -1435,7 +1487,7 @@ function ReadwiseReader:getDocumentList()
     end
     
     logger.dbg("ReadwiseReader:getDocumentList: total documents retrieved:", #documents)
-    return documents
+    return documents, deleted_on_device
 end
 
 function ReadwiseReader:getArchivedDocuments(since_date)
@@ -1546,6 +1598,7 @@ function ReadwiseReader:deleteArchivedDocuments(targets)
         -- Remove metadata for archived documents
         self:removeAuthorMetadata(target.id)
         self:removeSourceUrlMetadata(target.id)
+        self:removeDownloadRecord(target.id)
         deleted_count = deleted_count + 1
     end
 
@@ -1580,6 +1633,7 @@ function ReadwiseReader:reconcileLocalDocuments(server_documents)
             FileManager:deleteFile(filepath, true)
             self:removeAuthorMetadata(doc_id)
             self:removeSourceUrlMetadata(doc_id)
+            self:removeDownloadRecord(doc_id)
             removed_count = removed_count + 1
         end
     end)
@@ -1758,6 +1812,7 @@ function ReadwiseReader:downloadDocument(document, cover_run)
     
     if success then
         logger.dbg("ReadwiseReader:downloadDocument: saved", document.id, "to", filepath)
+        self.downloaded_documents[document.id] = true
 
         -- Write metadata sidecar file for KOReader library integration
         local status, err = pcall(function() self:setDocumentMetadata(filepath, document) end)
@@ -2200,6 +2255,7 @@ function ReadwiseReader:archiveDocument(document_id)
         -- Remove metadata when document is archived
         self:removeAuthorMetadata(document_id)
         self:removeSourceUrlMetadata(document_id)
+        self:removeDownloadRecord(document_id)
         return true
     else
         logger.err("ReadwiseReader:archiveDocument: failed to archive", document_id, err)
@@ -2307,8 +2363,8 @@ function ReadwiseReader:synchronize()
     end
     
     self:showProgress("Getting document list…")
-    local documents = self:getDocumentList()
-    
+    local documents, deleted_on_device = self:getDocumentList()
+
     if not documents then
         self:hideProgress()
         UIManager:show(InfoMessage:new{ text = "Failed to get document list from Readwise Reader." })
@@ -2338,12 +2394,17 @@ function ReadwiseReader:synchronize()
         end
     end
 
+    local deleted_on_device_line = "\n" .. string.format("Not downloaded (deleted on this device): %d", deleted_on_device)
+
     if #filtered_documents == 0 and not covers_pending and cleaned_count == 0 and archived_count == 0 and highlights_exported == 0 and reconciled_count == 0 then
         local msg = "No new articles found and no changes to process."
         if existing_count > 0 then
             msg = msg .. "\n" .. string.format("Skipped %d existing articles.", existing_count)
         end
-        
+        if deleted_on_device > 0 then
+            msg = msg .. deleted_on_device_line
+        end
+
         self:hideProgress()
         UIManager:show(InfoMessage:new{ text = msg })
         
@@ -2418,7 +2479,11 @@ function ReadwiseReader:synchronize()
     if skipped > 0 then
         msg = msg .. "\n" .. string.format("Skipped (tags or location): %d", skipped)
     end
-    
+
+    if deleted_on_device > 0 then
+        msg = msg .. deleted_on_device_line
+    end
+
     if failed > 0 then
         msg = msg .. "\n" .. string.format("Failed: %d", failed)
     end
@@ -2470,6 +2535,7 @@ function ReadwiseReader:saveSettings()
         document_locations = self.document_locations,
         document_authors = self.document_authors,
         document_source_urls = self.document_source_urls,
+        downloaded_documents = self.downloaded_documents,
         reader_highlights = self.reader_highlights,
         download_images = self.download_images,
         max_image_size_mb = self.max_image_size_mb,
