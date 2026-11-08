@@ -21,7 +21,7 @@ local object = {}
 function object:extend(value) return setmetatable(value or {}, { __index = self }) end
 function object:new(value) return self:extend(value) end
 
-local stored, messages, statuses, picker
+local stored, messages, statuses, picker, confirm
 local settings = {}
 function settings:readSetting(key) return copy(stored[key]) end
 function settings:saveSetting(key, value) stored[key] = copy(value) end
@@ -67,6 +67,12 @@ local modules = {
             return { chooseDir = noop }
         end,
     },
+    ["ui/widget/confirmbox"] = {
+        new = function(_, value)
+            confirm = value
+            return value
+        end,
+    },
     clip = object,
     device = { isKindle = function() return false end },
     util = {
@@ -76,7 +82,7 @@ local modules = {
     gettext = function(s) return s end,
 }
 local unused = {
-    "ui/bidi", "ui/event", "ffi/util", "ui/widget/inputdialog", "ui/widget/confirmbox",
+    "ui/bidi", "ui/event", "ffi/util", "ui/widget/inputdialog",
     "ui/widget/multiconfirmbox", "readcollection", "ui/network/manager", "readhistory",
     "apps/filemanager/filemanagerutil", "socket.http", "ltn12", "mime", "socket",
     "socketutil", "json", "rapidjson", "ui/renderimage",
@@ -173,7 +179,7 @@ local passed = 0
 local function test(name, run)
     folder, other_folder = makeFolder(), makeFolder()
     stored = { readwisereader = { access_token = "test-token", directory = folder } }
-    messages, statuses, listed, archived, picker = {}, {}, {}, {}, nil
+    messages, statuses, listed, archived, picker, confirm = {}, {}, {}, {}, nil, nil
     local ok, err = pcall(run)
     os.execute("rm -rf '" .. folder .. "' '" .. other_folder .. "'")
     if not ok then error(name .. ": " .. tostring(err)) end
@@ -291,6 +297,37 @@ test("an article reconciled away by the plugin can download again", function()
     contains(sync(), "Removed (no longer on server): 1")
     assert(not onDevice("a"))
     listed = { doc }
+    contains(sync(), "Downloaded: 1")
+    assert(onDevice("a"))
+end)
+
+-- Unticking a tag or location in "Include in sync" removes its articles. Those were
+-- removed by the plugin, so they come back when it is ticked again.
+test("an article removed for an excluded tag comes back when the tag is included", function()
+    local doc = article("a")
+    doc.tags = { t1 = { name = "news" } }
+    listed = { doc }
+    sync()
+    newReader():toggleTagExclusion("news")
+    assert(not onDevice("a"))
+    -- Two syncs, because an excluded article is only skipped early every other sync.
+    for _ = 1, 2 do
+        assert(not sync():find("deleted on this device", 1, true))
+    end
+    assert(not onDevice("a"))
+    newReader():toggleTagExclusion("news")
+    contains(sync(), "Downloaded: 1")
+    assert(onDevice("a"))
+end)
+
+test("an article removed for an excluded location comes back when it is included", function()
+    listed = { article("a") }
+    sync()
+    newReader():toggleLocationExclusion("new")
+    confirm.ok_callback()
+    assert(not onDevice("a"))
+    assert(not sync():find("deleted on this device", 1, true))
+    newReader():toggleLocationExclusion("new")
     contains(sync(), "Downloaded: 1")
     assert(onDevice("a"))
 end)

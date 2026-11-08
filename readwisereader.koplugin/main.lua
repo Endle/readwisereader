@@ -1003,6 +1003,7 @@ function ReadwiseReader:performDeleteArticlesWithLocation(location)
         if self:documentHasLocation(doc_id, location) then
             logger.dbg("ReadwiseReader:deleteArticlesWithLocation: deleting", filepath, "with location", location)
             FileManager:deleteFile(filepath, true)
+            self:removeDownloadRecord(doc_id)
             deleted_count = deleted_count + 1
         end
     end)
@@ -1072,6 +1073,7 @@ function ReadwiseReader:deleteArticlesWithTag(tag)
         if self:documentHasTag(doc_id, tag) then
             logger.dbg("ReadwiseReader:deleteArticlesWithTag: deleting", filepath, "with tag", tag)
             FileManager:deleteFile(filepath, true)
+            self:removeDownloadRecord(doc_id)
             deleted_count = deleted_count + 1
         end
     end)
