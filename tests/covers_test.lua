@@ -288,7 +288,7 @@ local function pathOf(n) return "/reader/doc-" .. n .. ".html" end
 -- local_paths: Readwise id -> file, the articles already on the device.
 local function readerFor(documents, local_paths, fields)
     local reader = Reader:new{
-        download_covers = true, covers_failed = {},
+        download_covers = true, covers_failed = {}, downloaded_documents = {},
         localDocumentPaths = function() return local_paths end,
         documentExists = function(_, id) return local_paths[id] ~= nil end,
         shouldSkipDocument = function() return false end,
@@ -296,7 +296,7 @@ local function readerFor(documents, local_paths, fields)
         api = { resetRateLimit = noop },
         cleanupArchivedDocuments = function() return 0 end,
         reconcileLocalDocuments = function() return 0 end,
-        getDocumentList = function() return documents end,
+        getDocumentList = function() return documents, 0 end,
         updateAvailableTags = noop, showProgress = noop, hideProgress = noop,
         saveSettings = noop, initCollectionTracking = noop, saveCollections = noop,
         storeAuthorMetadata = noop, storeSourceUrlMetadata = noop,
